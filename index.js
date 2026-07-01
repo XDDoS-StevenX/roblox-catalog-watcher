@@ -71,10 +71,17 @@ async function fetchCurrentItems() {
       if (!isOfficialRoblox) continue;
 
       let forSale;
-      if (typeof it.isForSale === "boolean") forSale = it.isForSale;
-      else if (typeof it.purchasable === "boolean") forSale = it.purchasable;
-      else if (typeof it.isPurchasable === "boolean") forSale = it.isPurchasable;
-      else forSale = undefined;
+if (typeof it.priceStatus === "string") {
+  forSale = !/off\s*sale/i.test(it.priceStatus);
+} else if (typeof it.isForSale === "boolean") {
+  forSale = it.isForSale;
+} else if (typeof it.purchasable === "boolean") {
+  forSale = it.purchasable;
+} else if (typeof it.isPurchasable === "boolean") {
+  forSale = it.isPurchasable;
+} else {
+  forSale = undefined;
+}
 
       items.push({
         id: it.id,
