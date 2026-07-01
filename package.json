@@ -1,0 +1,16 @@
+{
+  "name": "roblox-catalog-watcher",
+  "version": "1.0.0",
+  "description": "Vigila una categoria del catalogo de Roblox, notifica items nuevos/retirados a Discord y a un juego de Roblox via MessagingService",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
