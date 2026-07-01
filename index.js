@@ -70,8 +70,7 @@ async function fetchCurrentItems() {
       // Filtro de seguridad: solo items creados por la cuenta oficial de
       // Roblox (creatorTargetId 1, creatorType "Roblox"). Descarta UGC de
       // otros usuarios/grupos aunque la query no lo haya filtrado bien.
-      const isOfficialRoblox =
-        it.creatorType === "Roblox" || String(it.creatorTargetId) === "1";
+      const isOfficialRoblox = String(it.creatorTargetId) === "1";
       if (!isOfficialRoblox) continue;
 
       items.push({
