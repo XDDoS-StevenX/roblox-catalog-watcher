@@ -30,19 +30,12 @@ const DETAILS_URL = "https://catalog.roblox.com/v1/catalog/items/details";
 const MESSAGING_URL = (universeId, topic) =>
   `https://apis.roblox.com/messaging-service/v1/universes/${universeId}/topics/${topic}`;
 
-// ---------- Persistencia ----------
-// NOTA: en Render, un Background Worker sin "persistent disk" tiene
-// filesystem efimero: si el proceso se reinicia (deploy, crash, etc.)
-// este archivo se pierde y el bot "redescubrira" todo como nuevo una vez.
-// Para produccion seria, agrega un Render Disk montado en /data y usa
-// STATE_FILE = "/data/state.json", o migra esto a una key-value store
-// externa (ej. Upstash Redis, gratis).
 async function loadState() {
   try {
     const raw = await fs.readFile(STATE_FILE, "utf-8");
     return JSON.parse(raw);
   } catch {
-    return { known: {} }; // known[itemId] = { name, price, forSale: true }
+    return { known: {} };
   }
 }
 
@@ -50,7 +43,6 @@ async function saveState(state) {
   await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2));
 }
 
-// ---------- Roblox: descubrir items de la categoria ----------
 async function fetchCatalogPage(cursor) {
   const url = new URL(SEARCH_URL);
   for (const [k, v] of new URLSearchParams(CATALOG_QUERY)) {
@@ -88,7 +80,6 @@ async function fetchCurrentItems() {
   return items;
 }
 
-// ---------- Roblox: revisar si items ya conocidos siguen a la venta ----------
 async function checkStillForSale(itemIds) {
   if (itemIds.length === 0) return {};
   const chunks = [];
@@ -117,20 +108,12 @@ async function checkStillForSale(itemIds) {
   return result;
 }
 
-// ---------- Notificaciones ----------
 async function notifyDiscord({ title, description, color }) {
   await fetch(DISCORD_WEBHOOK_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      embeds: [
-        {
-          title,
-          description,
-          color,
-          timestamp: new Date().toISOString(),
-        },
-      ],
+      embeds: [{ title, description, color, timestamp: new Date().toISOString() }],
     }),
   }).catch((err) => console.error("Error notificando a Discord:", err));
 }
@@ -138,10 +121,7 @@ async function notifyDiscord({ title, description, color }) {
 async function notifyRoblox(payload) {
   const res = await fetch(MESSAGING_URL(UNIVERSE_ID, MESSAGING_TOPIC), {
     method: "POST",
-    headers: {
-      "x-api-key": ROBLOX_API_KEY,
-      "Content-Type": "application/json",
-    },
+    headers: { "x-api-key": ROBLOX_API_KEY, "Content-Type": "application/json" },
     body: JSON.stringify({ message: JSON.stringify(payload) }),
   });
   if (!res.ok) {
@@ -149,7 +129,6 @@ async function notifyRoblox(payload) {
   }
 }
 
-// ---------- Ciclo principal ----------
 async function tick() {
   const state = await loadState();
   let current;
@@ -162,7 +141,6 @@ async function tick() {
 
   const currentIds = new Set(current.map((i) => String(i.id)));
 
-  // 1) Items nuevos (aparecen ahora, no estaban en el estado)
   const newItems = current.filter((i) => !state.known[i.id]);
 
   for (const item of newItems) {
@@ -172,19 +150,10 @@ async function tick() {
       description: `**${item.name}**\nPrecio: ${item.price ?? "N/A"}\nID: ${item.id}`,
       color: 0x2ecc71,
     });
-    await notifyRoblox({
-      type: "ITEM_ADDED",
-      id: item.id,
-      name: item.name,
-      price: item.price,
-    });
+    await notifyRoblox({ type: "ITEM_ADDED", id: item.id, name: item.name, price: item.price });
     state.known[item.id] = { name: item.name, price: item.price, forSale: true };
   }
 
-  // 2) Items que ya conociamos pero ya no aparecen en la busqueda actual:
-  // pueden estar fuera de la primera(s) pagina(s) simplemente por orden,
-  // asi que los re-confirmamos contra el endpoint de detalles antes de
-  // avisar que salieron de venta (evita falsos positivos).
   const missingIds = Object.keys(state.known).filter(
     (id) => state.known[id].forSale && !currentIds.has(id)
   );
@@ -204,8 +173,6 @@ async function tick() {
         await notifyRoblox({ type: "ITEM_REMOVED", id: Number(id), name: item.name });
         state.known[id].forSale = false;
       }
-      // si stillForSale es true o undefined (fallo de red), no hacemos nada:
-      // seguimos considerandolo a la venta y lo reintentamos el proximo ciclo
     }
   }
 
@@ -214,8 +181,14 @@ async function tick() {
 
 async function main() {
   console.log("roblox-catalog-watcher iniciado");
+
+  if (process.env.RUN_ONCE === "true") {
+    await tick();
+    console.log("Ciclo unico completado, saliendo.");
+    return;
+  }
+
   const interval = Number(POLL_INTERVAL_MS);
-  // corre inmediatamente y luego cada `interval` ms
   await tick().catch((err) => console.error("Error en tick:", err));
   setInterval(() => {
     tick().catch((err) => console.error("Error en tick:", err));
