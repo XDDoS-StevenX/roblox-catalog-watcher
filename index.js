@@ -67,17 +67,21 @@ async function fetchCurrentItems() {
   for (let page = 0; page < maxPages; page++) {
     const data = await fetchCatalogPage(cursor);
     for (const it of data.data ?? []) {
-      // Filtro de seguridad: solo items creados por la cuenta oficial de
-      // Roblox (creatorTargetId 1, creatorType "Roblox"). Descarta UGC de
-      // otros usuarios/grupos aunque la query no lo haya filtrado bien.
       const isOfficialRoblox = String(it.creatorTargetId) === "1";
       if (!isOfficialRoblox) continue;
+
+      let forSale;
+      if (typeof it.isForSale === "boolean") forSale = it.isForSale;
+      else if (typeof it.purchasable === "boolean") forSale = it.purchasable;
+      else if (typeof it.isPurchasable === "boolean") forSale = it.isPurchasable;
+      else forSale = undefined;
 
       items.push({
         id: it.id,
         name: it.name,
         price: it.price ?? null,
         itemType: it.itemType ?? "Asset",
+        forSale,
       });
     }
     cursor = data.nextPageCursor;
@@ -151,13 +155,25 @@ async function tick() {
 
   for (const item of newItems) {
     console.log(`Nuevo item detectado: ${item.name} (${item.id})`);
+    const saleLabel =
+      item.forSale === true
+        ? "Si, a la venta"
+        : item.forSale === false
+        ? "No, fuera de venta / oculto"
+        : "Desconocido";
     await notifyDiscord({
-      title: "Nuevo objeto disponible",
-      description: `**${item.name}**\nPrecio: ${item.price ?? "N/A"}\nID: ${item.id}`,
-      color: 0x2ecc71,
+      title: "Nuevo objeto detectado",
+      description: `**${item.name}**\nPrecio: ${item.price ?? "N/A"}\nA la venta: ${saleLabel}\nID: ${item.id}`,
+      color: item.forSale === false ? 0xf1c40f : 0x2ecc71,
     });
-    await notifyRoblox({ type: "ITEM_ADDED", id: item.id, name: item.name, price: item.price });
-    state.known[item.id] = { name: item.name, price: item.price, forSale: true };
+    await notifyRoblox({
+      type: "ITEM_ADDED",
+      id: item.id,
+      name: item.name,
+      price: item.price,
+      forSale: item.forSale,
+    });
+    state.known[item.id] = { name: item.name, price: item.price, forSale: item.forSale !== false };
   }
 
   const missingIds = Object.keys(state.known).filter(
