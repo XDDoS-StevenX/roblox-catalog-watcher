@@ -126,7 +126,9 @@ async function fetchCurrentItems() {
         itemType: it.itemType ?? "Asset",
         forSale,
         createdUtc: it.itemCreatedUtc ?? null,
-        isLimited: Boolean(it.collectibleItemId),
+        isLimited: Array.isArray(it.itemRestrictions)
+          ? it.itemRestrictions.some((r) => /limited/i.test(r))
+          : false,
         itemStatus: Array.isArray(it.itemStatus) ? it.itemStatus : [],
         favoriteCount: typeof it.favoriteCount === "number" ? it.favoriteCount : null,
       });
@@ -173,6 +175,23 @@ function robloxThumbnailUrl(assetId) {
 
 function robloxItemUrl(assetId) {
   return `https://www.roblox.com/catalog/${assetId}`;
+}
+
+async function fetchThumbnailUrl(assetId) {
+  try {
+    const url = `https://thumbnails.roproxy.com/v1/assets?assetIds=${assetId}&size=150x150&format=png&isCircular=false`;
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      },
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data?.data?.[0]?.imageUrl ?? null;
+  } catch {
+    return null;
+  }
 }
 
 async function notifyDiscord({ title, description, color, fields, thumbnailUrl, url }) {
@@ -227,38 +246,43 @@ async function tick() {
   const newItems = current.filter((i) => !state.known[i.id]);
 
   for (const item of newItems) {
-    console.log(`Nuevo item detectado: ${item.name} (${item.id})`);
-    const saleLabel = item.forSale === true ? "Si" : item.forSale === false ? "No" : "Desconocido";
+    console.log(`New item detected: ${item.name} (${item.id})`);
+    const saleLabel = item.forSale === true ? "Yes" : item.forSale === false ? "No" : "Unknown";
     const createdLabel = item.createdUtc
-      ? new Date(item.createdUtc).toLocaleString("es-ES", {
+      ? new Date(item.createdUtc).toLocaleString("en-US", {
           year: "numeric",
           month: "2-digit",
           day: "2-digit",
           hour: "2-digit",
           minute: "2-digit",
         })
-      : "Desconocido";
+      : "Unknown";
 
     const isNew = item.itemStatus.some((s) => /new/i.test(s));
-    const tagsLabel = item.itemStatus.length > 0 ? item.itemStatus.join(", ") : "Ninguno";
+    const tagsLabel = item.itemStatus.length > 0 ? item.itemStatus.join(", ") : "None";
+    // Si el item no esta a la venta, el precio que trae la API puede ser un
+    // valor residual sin sentido (ej. "1"). Mostramos "None" en ese caso en
+    // vez de un numero enganoso.
+    const priceLabel = item.forSale === false ? "None" : item.price != null ? `${item.price} R$` : "N/A";
+    const thumbnailUrl = (await fetchThumbnailUrl(item.id)) || robloxThumbnailUrl(item.id);
 
     await notifyDiscord({
-      title: `✨ Nuevo objeto detectado - ${item.name}`,
+      title: `✨ New Item Detected - ${item.name}`,
       description: item.description || undefined,
       url: robloxItemUrl(item.id),
-      thumbnailUrl: robloxThumbnailUrl(item.id),
+      thumbnailUrl,
       color: item.forSale === false ? 0xf1c40f : 0x2ecc71,
       fields: [
         { name: "🆔 ID", value: String(item.id), inline: true },
-        { name: "💵 Precio", value: item.price != null ? `${item.price} R$` : "N/A", inline: true },
-        { name: "🔒 Limitado?", value: item.isLimited ? "Si" : "No", inline: true },
-        { name: "📅 Creado", value: createdLabel, inline: true },
-        { name: "💸 A la venta?", value: saleLabel, inline: true },
-        { name: "🆕 Marcado como nuevo?", value: isNew ? "Si" : "No", inline: true },
-        { name: "💎 Tags del item", value: tagsLabel, inline: false },
+        { name: "💵 Price", value: priceLabel, inline: true },
+        { name: "🔒 Limited?", value: item.isLimited ? "Yes" : "No", inline: true },
+        { name: "📅 Created", value: createdLabel, inline: true },
+        { name: "💸 On Sale?", value: saleLabel, inline: true },
+        { name: "🆕 New Tag?", value: isNew ? "Yes" : "No", inline: true },
+        { name: "💎 Item Tags", value: tagsLabel, inline: false },
         {
-          name: "⭐ Favoritos",
-          value: item.favoriteCount != null ? item.favoriteCount.toLocaleString("es-ES") : "N/A",
+          name: "⭐ Favorites",
+          value: item.favoriteCount != null ? item.favoriteCount.toLocaleString("en-US") : "N/A",
           inline: true,
         },
       ],
@@ -267,7 +291,7 @@ async function tick() {
       type: "ITEM_ADDED",
       id: item.id,
       name: item.name,
-      price: item.price,
+      price: item.forSale === false ? null : item.price,
       forSale: item.forSale,
       isLimited: item.isLimited,
       favoriteCount: item.favoriteCount,
@@ -289,15 +313,16 @@ async function tick() {
       const stillForSale = status[id];
       if (stillForSale === false) {
         const item = state.known[id];
-        console.log(`Item retirado de venta: ${item.name} (${id})`);
+        console.log(`Item removed from sale: ${item.name} (${id})`);
+        const thumbnailUrl = (await fetchThumbnailUrl(id)) || robloxThumbnailUrl(id);
         await notifyDiscord({
-          title: `📉 Objeto retirado de venta - ${item.name}`,
+          title: `📉 Item Removed From Sale - ${item.name}`,
           url: robloxItemUrl(id),
-          thumbnailUrl: robloxThumbnailUrl(id),
+          thumbnailUrl,
           color: 0xe74c3c,
           fields: [
             { name: "🆔 ID", value: String(id), inline: true },
-            { name: "💵 Ultimo precio", value: item.price != null ? `${item.price} R$` : "N/A", inline: true },
+            { name: "💵 Last Price", value: item.price != null ? `${item.price} R$` : "N/A", inline: true },
           ],
         });
         await notifyRoblox({ type: "ITEM_REMOVED", id: Number(id), name: item.name });
@@ -330,4 +355,3 @@ async function main() {
 }
 
 main();
-      
