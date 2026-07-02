@@ -1,3 +1,454 @@
 {
-  "known": {}
+  "known": {
+    "1039433": {
+      "name": "O NOES",
+      "price": 2000,
+      "forSale": false
+    },
+    "95013276821210": {
+      "name": "Soundwave Headphones ",
+      "price": 1,
+      "forSale": false
+    },
+    "131827282826397": {
+      "name": "Lana’s Life Jubilant Jelly Wings",
+      "price": 1,
+      "forSale": false
+    },
+    "128076867561836": {
+      "name": "Lana’s Life Mag Ring Light Starburst Aura",
+      "price": 1,
+      "forSale": false
+    },
+    "111229216468074": {
+      "name": "Lana’s Life Glammed Gaming Mouse Backpack",
+      "price": 1,
+      "forSale": false
+    },
+    "122491011135656": {
+      "name": "Lana’s Life Kitschy Cute Keyboard Backpack",
+      "price": 1,
+      "forSale": false
+    },
+    "131122060209736": {
+      "name": "Lana’s Life Glam Gamer Headphones",
+      "price": 1,
+      "forSale": false
+    },
+    "87489851891879": {
+      "name": "Wings of the Sun and Moon",
+      "price": 9000,
+      "forSale": false
+    },
+    "73030805068953": {
+      "name": "Arcane Fedora",
+      "price": 20000,
+      "forSale": false
+    },
+    "88418886917272": {
+      "name": "Fire Wyrm's Helm",
+      "price": 1,
+      "forSale": false
+    },
+    "107758660402174": {
+      "name": "Fire Wyrm's Wings",
+      "price": 1,
+      "forSale": false
+    },
+    "137145464140793": {
+      "name": "Fire Wyrm's Axe",
+      "price": 1,
+      "forSale": false
+    },
+    "134975007602805": {
+      "name": "Ice Wyrm's Helm",
+      "price": 1,
+      "forSale": false
+    },
+    "81265196514455": {
+      "name": "Ice Wyrm's Wings",
+      "price": 1,
+      "forSale": false
+    },
+    "73974892231117": {
+      "name": "Frostflame Wings",
+      "price": 5000,
+      "forSale": false
+    },
+    "92137983874490": {
+      "name": "Rose Quartz Crown",
+      "price": 8000,
+      "forSale": false
+    },
+    "76479271580913": {
+      "name": "Stormbreak Horns of the Tempest Skies",
+      "price": 30000,
+      "forSale": false
+    },
+    "107481669159818": {
+      "name": "Festival Guitar Case",
+      "price": 1,
+      "forSale": false
+    },
+    "97175762497782": {
+      "name": "Summer Duck",
+      "price": 1337,
+      "forSale": false
+    },
+    "102008252731800": {
+      "name": "Bloxy Cola Jetpack",
+      "price": 5000,
+      "forSale": false
+    },
+    "82455530313576": {
+      "name": "Pool Party Mr. Tentacles",
+      "price": 9001,
+      "forSale": false
+    },
+    "124250671392407": {
+      "name": "Fancy Play Spark Crown",
+      "price": 100,
+      "forSale": false
+    },
+    "83979903251280": {
+      "name": "Handle With Care Skyling Egg Hat",
+      "price": 100,
+      "forSale": false
+    },
+    "96179557480255": {
+      "name": "Nerba's Literal Book Bag Backpack",
+      "price": 100,
+      "forSale": false
+    },
+    "91218196809721": {
+      "name": "Definitely Real Skyling Wings",
+      "price": 100,
+      "forSale": false
+    },
+    "130325197766469": {
+      "name": "Big Brain Antennae Headband",
+      "price": 100,
+      "forSale": false
+    },
+    "119934643965525": {
+      "name": "Starwisp",
+      "price": 0,
+      "forSale": true
+    },
+    "112236137274369": {
+      "name": "Bling 67 Necklace",
+      "price": 1000,
+      "forSale": false
+    },
+    "124123149362911": {
+      "name": "Sk67r",
+      "price": 67,
+      "forSale": false
+    },
+    "93359895578004": {
+      "name": "Lana’s Life Hearts and Stars Aura",
+      "price": 1,
+      "forSale": false
+    },
+    "130102899011692": {
+      "name": "Lana’s Life Love & Dreams Choker Necklace",
+      "price": 1,
+      "forSale": false
+    },
+    "116078263925796": {
+      "name": "Lana’s Life Pearl Accessory",
+      "price": 1,
+      "forSale": false
+    },
+    "98458442723462": {
+      "name": "Korblox Pactbreaker - Pauldron",
+      "price": null,
+      "forSale": true
+    },
+    "117137997018260": {
+      "name": "Korblox Pactbreaker - Helmet",
+      "price": null,
+      "forSale": true
+    },
+    "101338411950236": {
+      "name": "Korblox Pactbreaker - Sword",
+      "price": null,
+      "forSale": true
+    },
+    "85595358191154": {
+      "name": "Blossoming Gift of New Beginnings",
+      "price": 1,
+      "forSale": false
+    },
+    "98263955840570": {
+      "name": "Taco Aura",
+      "price": 1,
+      "forSale": false
+    },
+    "122594155726839": {
+      "name": "Purple Clockwork Shades",
+      "price": 30000,
+      "forSale": false
+    },
+    "93456318814055": {
+      "name": "Soccer Flames Necklace",
+      "price": 1,
+      "forSale": false
+    },
+    "83035446607121": {
+      "name": "Soccer Wings",
+      "price": 1,
+      "forSale": false
+    },
+    "110532213863271": {
+      "name": "Goalkeeper's Hat Trick",
+      "price": 1,
+      "forSale": false
+    },
+    "127965619123096": {
+      "name": "Soccer Ball Chain",
+      "price": 1,
+      "forSale": false
+    },
+    "140223484513447": {
+      "name": "Wings of the Pactbreaker",
+      "price": 1,
+      "forSale": false
+    },
+    "128739664413207": {
+      "name": "Fractured Domino Crown",
+      "price": 1,
+      "forSale": false
+    },
+    "127761617449917": {
+      "name": "Zorzax - UFO",
+      "price": null,
+      "forSale": true
+    },
+    "118219791863674": {
+      "name": "Zorzax - Communicator",
+      "price": null,
+      "forSale": true
+    },
+    "100872807397458": {
+      "name": "Zorzax - Belt",
+      "price": null,
+      "forSale": true
+    },
+    "131083478731213": {
+      "name": "Beach Baggage",
+      "price": 1,
+      "forSale": false
+    },
+    "95189442220475": {
+      "name": "Seaside Sunhat",
+      "price": 1,
+      "forSale": false
+    },
+    "99584653934566": {
+      "name": "Tropical Floatie Cap",
+      "price": 1,
+      "forSale": false
+    },
+    "114365272448372": {
+      "name": "FCM Beret",
+      "price": 1,
+      "forSale": false
+    },
+    "127590062004073": {
+      "name": "Croissant Backpack",
+      "price": 1,
+      "forSale": false
+    },
+    "89916054413207": {
+      "name": "Red Dragon Charm Necklace",
+      "price": 1,
+      "forSale": false
+    },
+    "104004552407952": {
+      "name": "Dog Charm Necklace",
+      "price": 1,
+      "forSale": false
+    },
+    "73961134329103": {
+      "name": "Mythical Owl Charm Necklace",
+      "price": 1,
+      "forSale": false
+    },
+    "92399505508307": {
+      "name": "Rare Toucan Charm Necklace",
+      "price": 1,
+      "forSale": false
+    },
+    "80465654117368": {
+      "name": "Legendary Moon Cat Charm Necklace",
+      "price": 1,
+      "forSale": false
+    },
+    "139685634537105": {
+      "name": "Lana’s Life “Gotcha” Necklace",
+      "price": 1,
+      "forSale": false
+    },
+    "122895362034582": {
+      "name": "Lana’s Life Sparking Rose Necklace",
+      "price": 1,
+      "forSale": false
+    },
+    "102223631341802": {
+      "name": "Lana’s Life Slime Necklace",
+      "price": 1,
+      "forSale": false
+    },
+    "117349028354414": {
+      "name": "Lana’s Life Crystal Ball Necklace",
+      "price": 1,
+      "forSale": false
+    },
+    "126529406089044": {
+      "name": "Lana’s Life Rainbow Heart Sunglasses",
+      "price": 1,
+      "forSale": false
+    },
+    "91532775368417": {
+      "name": "Lana’s Life Rainbow Starburst Headwear",
+      "price": 1,
+      "forSale": false
+    },
+    "94601206060163": {
+      "name": "Lana’s Life Cutie Cat Barrette",
+      "price": 1,
+      "forSale": false
+    },
+    "116443694288135": {
+      "name": "Lana’s Life Kitty Cat Headband",
+      "price": 1,
+      "forSale": false
+    },
+    "111571328910928": {
+      "name": "Lana’s Life Cat’s Eye Headwear",
+      "price": 1,
+      "forSale": false
+    },
+    "93151966265887": {
+      "name": "HazardTech Helm Bot",
+      "price": 1,
+      "forSale": false
+    },
+    "88987427025702": {
+      "name": "HazardTech Bonnet Buddy",
+      "price": 1,
+      "forSale": false
+    },
+    "130882832589221": {
+      "name": "HazardTech Laser Lens",
+      "price": 1,
+      "forSale": false
+    },
+    "118952604111257": {
+      "name": "HazardTech Joyshades",
+      "price": 1,
+      "forSale": false
+    },
+    "135305308572584": {
+      "name": "HazardTech Spider Rig",
+      "price": 1,
+      "forSale": false
+    },
+    "71986268833862": {
+      "name": "Showdown Swordpack",
+      "price": 100000,
+      "forSale": false
+    },
+    "106983718353553": {
+      "name": "Showdown Traffic Cone",
+      "price": 100000,
+      "forSale": false
+    },
+    "135746074106179": {
+      "name": "Showdown Bunny Ears",
+      "price": 10000,
+      "forSale": false
+    },
+    "107056091315376": {
+      "name": "Cyber Kabuto",
+      "price": 1,
+      "forSale": false
+    },
+    "95752382334122": {
+      "name": "Kirigami Kabuto",
+      "price": 1,
+      "forSale": false
+    },
+    "78558447054376": {
+      "name": "Back Tablet",
+      "price": 1,
+      "forSale": false
+    },
+    "85129504077720": {
+      "name": "Heart Mech",
+      "price": 1,
+      "forSale": false
+    },
+    "112872125488872": {
+      "name": "Activity Bag",
+      "price": 140,
+      "forSale": true
+    },
+    "111773416976737": {
+      "name": "Alebrije Pal",
+      "price": 1,
+      "forSale": false
+    },
+    "90860745406044": {
+      "name": "Golden Liberty Crown",
+      "price": 1,
+      "forSale": false
+    },
+    "94166050537377": {
+      "name": "Cyber-Bumble Wings",
+      "price": 1,
+      "forSale": false
+    },
+    "128993186248115": {
+      "name": "Neon Pulse Wings",
+      "price": 1,
+      "forSale": false
+    },
+    "104993600337557": {
+      "name": "Cyber-Eagle Helmet",
+      "price": 1,
+      "forSale": false
+    },
+    "103134830506020": {
+      "name": "Juca Arararinha",
+      "price": 1,
+      "forSale": false
+    },
+    "124727635686515": {
+      "name": "Sand Stupa Cap",
+      "price": 95,
+      "forSale": true
+    },
+    "100570168794127": {
+      "name": "Pondering Egg Hat",
+      "price": 1,
+      "forSale": false
+    },
+    "117753029556391": {
+      "name": "Loose-Leaf Noob",
+      "price": 1,
+      "forSale": false
+    },
+    "120073035292517": {
+      "name": "Jester's Crown",
+      "price": 1,
+      "forSale": false
+    },
+    "122422318107009": {
+      "name": "Jester's Horns",
+      "price": 1,
+      "forSale": false
+    }
+  }
 }
