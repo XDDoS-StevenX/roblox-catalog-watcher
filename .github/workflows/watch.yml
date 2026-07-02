@@ -4,7 +4,7 @@ on:
   schedule:
     # cada 15 minutos. GitHub no garantiza precision exacta en horas pico,
     # a veces se retrasa unos minutos, es normal.
-    - cron: "*/15 * * * *"
+    - cron: '*/5 * * * *'
   workflow_dispatch: {} # permite correrlo manualmente desde la pestana Actions
 
 jobs:
