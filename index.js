@@ -25,8 +25,11 @@ for (const [key, val] of Object.entries({
 }
 
 const STATE_FILE = path.resolve("./state.json");
-const SEARCH_URL = "https://catalog.roblox.com/v1/search/items/details";
-const DETAILS_URL = "https://catalog.roblox.com/v1/catalog/items/details";
+// Se usa roproxy.com en vez de catalog.roblox.com porque Roblox bloquea
+// las IPs compartidas de GitHub Actions. roproxy es un espejo comunitario
+// muy usado por desarrolladores de Roblox para este mismo problema.
+const SEARCH_URL = "https://catalog.roproxy.com/v1/search/items/details";
+const DETAILS_URL = "https://catalog.roproxy.com/v1/catalog/items/details";
 const MESSAGING_URL = (universeId, topic) =>
   `https://apis.roblox.com/messaging-service/v1/universes/${universeId}/topics/${topic}`;
 
