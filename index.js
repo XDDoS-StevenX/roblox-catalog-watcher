@@ -484,4 +484,126 @@ async function tick() {
         const thumbnailUrl = (await fetchThumbnailUrl(id)) || robloxThumbnailUrl(id);
         const typeLabel = item.assetTypeName ?? item.itemType;
 
-      
+        pushEmbed(item.itemType, {
+          title: `📉 Item Removed From Sale - ${item.name}`,
+          url: robloxItemUrl(id),
+          color: 0xe74c3c,
+          thumbnail: { url: thumbnailUrl },
+          timestamp: new Date().toISOString(),
+          fields: [
+            { name: "🆔 ID", value: String(id), inline: true },
+            { name: "📦 Type", value: typeLabel, inline: true },
+            { name: "🧍 Body Slot", value: item.bodySlot ?? "N/A", inline: true },
+            { name: "💵 Last Price", value: item.price != null ? `${item.price} R$` : "N/A", inline: true },
+          ],
+        });
+        await notifyRoblox({
+          type: "ITEM_REMOVED",
+          id: Number(id),
+          name: item.name,
+          itemType: item.itemType,
+          assetTypeId: item.assetTypeId,
+          assetTypeName: item.assetTypeName,
+          bodySlot: item.bodySlot,
+        });
+        state.known[id].forSale = false;
+      }
+      // si stillForSale es true o undefined (fallo de red), no hacemos nada:
+      // seguimos considerandolo a la venta y lo reintentamos el proximo ciclo
+    }
+  }
+
+  // 3) Items ya conocidos que siguen a la venta: revisamos si cambio su
+  // fecha limite o su cupo restante (relevante para Limited/LimitedUnique
+  // con tiempo o cantidad fija de venta, ej. bundles de temporada). Tambien
+  // calculamos cuantas unidades se vendieron desde que el bot lo detecto.
+  const stillOnSaleItems = current.filter(
+    (i) => state.known[i.id] && state.known[i.id].forSale !== false
+  );
+
+  for (const item of stillOnSaleItems) {
+    const prev = state.known[item.id];
+    const deadlineChanged = (item.offSaleDeadline ?? null) !== (prev.offSaleDeadline ?? null);
+    const qtyChanged =
+      item.unitsAvailableForConsumption != null &&
+      item.unitsAvailableForConsumption !== prev.unitsAvailableForConsumption;
+    const soldOut = item.isLimitedUnique && item.unitsAvailableForConsumption === 0;
+
+    if (!deadlineChanged && !qtyChanged) continue;
+
+    const unitsSold =
+      item.isLimitedUnique && prev.originalUnits != null && item.unitsAvailableForConsumption != null
+        ? Math.max(0, prev.originalUnits - item.unitsAvailableForConsumption)
+        : null;
+
+    console.log(`Limit info updated: ${item.name} (${item.id})${soldOut ? " [SOLD OUT]" : ""}`);
+    const thumbnailUrl = (await fetchThumbnailUrl(item.id)) || robloxThumbnailUrl(item.id);
+    const typeLabel = item.assetTypeName ?? item.itemType;
+
+    pushEmbed(item.itemType, {
+      title: soldOut ? `🚨 SOLD OUT - ${item.name}` : `⏳ Sale Limit Updated - ${item.name}`,
+      url: robloxItemUrl(item.id),
+      color: soldOut ? 0x992d22 : 0x9b59b6,
+      thumbnail: { url: thumbnailUrl },
+      timestamp: new Date().toISOString(),
+      fields: [
+        { name: "🆔 ID", value: String(item.id), inline: true },
+        { name: "📦 Type", value: typeLabel, inline: true },
+        { name: "⏰ Sale Deadline", value: dateLabel(item.offSaleDeadline), inline: true },
+        { name: "📦 Units Remaining", value: qtyLabel(item.unitsAvailableForConsumption), inline: true },
+        ...(unitsSold != null ? [{ name: "🛒 Units Sold (since tracked)", value: unitsSold.toLocaleString("en-US"), inline: true }] : []),
+      ],
+    });
+    await notifyRoblox({
+      type: soldOut ? "ITEM_SOLD_OUT" : "ITEM_LIMIT_UPDATE",
+      id: item.id,
+      name: item.name,
+      itemType: item.itemType,
+      assetTypeId: item.assetTypeId,
+      assetTypeName: item.assetTypeName,
+      bodySlot: item.bodySlot,
+      offSaleDeadline: item.offSaleDeadline,
+      unitsAvailableForConsumption: item.unitsAvailableForConsumption,
+      unitsSold,
+    });
+
+    state.known[item.id].offSaleDeadline = item.offSaleDeadline ?? null;
+    state.known[item.id].unitsAvailableForConsumption = item.unitsAvailableForConsumption ?? null;
+  }
+
+  // Armar y mandar el digest agrupado: Bundles primero, luego el resto.
+  const typeOrder = ["Bundle", "Asset"];
+  const sortedTypes = Object.keys(digestGroups).sort(
+    (a, b) => typeOrder.indexOf(a) - typeOrder.indexOf(b)
+  );
+  const digestEmbeds = [];
+  for (const t of sortedTypes) {
+    const label = t === "Bundle" ? "📦 BUNDLES" : "🎩 ACCESSORIES / ITEMS";
+    digestEmbeds.push(sectionHeaderEmbed(label, digestGroups[t].length));
+    digestEmbeds.push(...digestGroups[t]);
+  }
+  await sendDigest(digestEmbeds);
+
+  await saveState(state);
+}
+
+async function main() {
+  console.log("roblox-catalog-watcher iniciado");
+
+  // RUN_ONCE=true: corre un solo ciclo y termina (modo para GitHub Actions
+  // cron u otro scheduler externo, en vez de mantener un proceso 24/7).
+  if (process.env.RUN_ONCE === "true") {
+    await tick();
+    console.log("Ciclo unico completado, saliendo.");
+    return;
+  }
+
+  const interval = Number(POLL_INTERVAL_MS);
+  await tick().catch((err) => console.error("Error en tick:", err));
+  setInterval(() => {
+    tick().catch((err) => console.error("Error en tick:", err));
+  }, interval);
+}
+
+main();
+    
