@@ -7,9 +7,17 @@ const {
   UNIVERSE_ID,
   MESSAGING_TOPIC = "ItemCatalogUpdate",
   DISCORD_WEBHOOK_URL,
+  // Opcional. ID del rol de Discord a mencionar en cada notificacion (clic
+  // derecho en el rol con "Modo desarrollador" activado -> Copiar ID). Si
+  // no se define, los mensajes salen sin mencion, igual que antes.
+  DISCORD_ROLE_ID,
   CATALOG_QUERY,
   POLL_INTERVAL_MS = "45000",
   MAX_PAGES = "3",
+  // Precio (R$) desde el cual un item se marca como "alto valor" para el
+  // panel de items destacados en el juego. Se manda al game via el campo
+  // "isHighValue" en cada payload de MessagingService.
+  FEATURED_MIN_PRICE = "1000",
 } = process.env;
 
 for (const [key, val] of Object.entries({
@@ -129,8 +137,23 @@ async function fetchCurrentItems() {
         isLimited: Array.isArray(it.itemRestrictions)
           ? it.itemRestrictions.some((r) => /limited/i.test(r))
           : false,
+        // "Limited" = solo tiempo/cupo dinamico. "LimitedUnique" = cupo fijo
+        // desde el inicio (coleccionable numerado). Guardamos cual es porque
+        // cambia como se interpreta unitsAvailableForConsumption.
+        isLimitedUnique: Array.isArray(it.itemRestrictions)
+          ? it.itemRestrictions.some((r) => /limitedunique/i.test(r))
+          : false,
         itemStatus: Array.isArray(it.itemStatus) ? it.itemStatus : [],
         favoriteCount: typeof it.favoriteCount === "number" ? it.favoriteCount : null,
+        // Fecha limite de venta (null si no tiene). Campo real de la API:
+        // "offSaleDeadline".
+        offSaleDeadline: it.offSaleDeadline ?? null,
+        // Cupo restante para items Limited/LimitedUnique. null = sin cupo
+        // fijo o el campo no vino en esta respuesta.
+        unitsAvailableForConsumption:
+          typeof it.unitsAvailableForConsumption === "number"
+            ? it.unitsAvailableForConsumption
+            : null,
       });
     }
     cursor = data.nextPageCursor;
@@ -140,11 +163,13 @@ async function fetchCurrentItems() {
 }
 
 // ---------- Roblox: revisar si items ya conocidos siguen a la venta ----------
-async function checkStillForSale(itemIds) {
-  if (itemIds.length === 0) return {};
+// items: [{ id, itemType }]. Antes esto forzaba itemType "Asset" para todo,
+// lo cual da resultados invalidos para bundles (itemType "Bundle").
+async function checkStillForSale(items) {
+  if (items.length === 0) return {};
   const chunks = [];
-  for (let i = 0; i < itemIds.length; i += 120) {
-    chunks.push(itemIds.slice(i, i + 120));
+  for (let i = 0; i < items.length; i += 120) {
+    chunks.push(items.slice(i, i + 120));
   }
 
   const result = {};
@@ -153,7 +178,7 @@ async function checkStillForSale(itemIds) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        items: chunk.map((id) => ({ itemType: "Asset", id })),
+        items: chunk.map(({ id, itemType }) => ({ itemType: itemType || "Asset", id })),
       }),
     });
     if (!res.ok) {
@@ -162,7 +187,14 @@ async function checkStillForSale(itemIds) {
     }
     const data = await res.json();
     for (const it of data.data ?? []) {
-      result[it.id] = Boolean(it.purchasable ?? it.isPurchasable ?? false);
+      result[it.id] = {
+        purchasable: Boolean(it.purchasable ?? it.isPurchasable ?? false),
+        offSaleDeadline: it.offSaleDeadline ?? null,
+        unitsAvailableForConsumption:
+          typeof it.unitsAvailableForConsumption === "number"
+            ? it.unitsAvailableForConsumption
+            : null,
+      };
     }
   }
   return result;
@@ -194,25 +226,37 @@ async function fetchThumbnailUrl(assetId) {
   }
 }
 
-async function notifyDiscord({ title, description, color, fields, thumbnailUrl, url }) {
-  await fetch(DISCORD_WEBHOOK_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      embeds: [
-        {
-          title,
-          description,
-          color,
-          url,
-          fields,
-          thumbnail: thumbnailUrl ? { url: thumbnailUrl } : undefined,
-          timestamp: new Date().toISOString(),
-          footer: { text: "roblox-catalog-watcher" },
-        },
-      ],
-    }),
-  }).catch((err) => console.error("Error notificando a Discord:", err));
+// Envia UN mensaje "Item Update" con todos los embeds de esta corrida,
+// agrupados por categoria (Bundles primero, luego Accesorios/Assets). Cada
+// grupo lleva un embed "divisor" a modo de encabezado de seccion. Discord
+// permite max 10 embeds por mensaje, asi que si hay mas se manda en varios
+// mensajes seguidos (solo el primero menciona el rol, para no spamear ping).
+function sectionHeaderEmbed(label, count) {
+  return {
+    title: label,
+    description: `${count} update${count === 1 ? "" : "s"} detected this run`,
+    color: 0x2f3136,
+  };
+}
+
+async function sendDigest(embeds) {
+  if (embeds.length === 0) return;
+  const chunks = [];
+  for (let i = 0; i < embeds.length; i += 10) chunks.push(embeds.slice(i, i + 10));
+
+  for (let i = 0; i < chunks.length; i++) {
+    const mention = i === 0 && Boolean(DISCORD_ROLE_ID);
+    await fetch(DISCORD_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: i === 0 ? (mention ? `<@&${DISCORD_ROLE_ID}> **Item Update**` : "**Item Update**") : undefined,
+        allowed_mentions: mention ? { roles: [DISCORD_ROLE_ID] } : { parse: [] },
+        embeds: chunks[i],
+      }),
+    }).catch((err) => console.error("Error notificando a Discord:", err));
+    if (i < chunks.length - 1) await sleep(1200); // margen para el rate limit de webhooks
+  }
 }
 
 async function notifyRoblox(payload) {
@@ -241,6 +285,27 @@ async function tick() {
   }
 
   const currentIds = new Set(current.map((i) => String(i.id)));
+  const minValue = Number(FEATURED_MIN_PRICE);
+  const dateLabel = (ts) =>
+    ts
+      ? new Date(ts).toLocaleString("en-US", {
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+        })
+      : "None";
+  const qtyLabel = (n) => (n != null ? n.toLocaleString("en-US") : "Unlimited");
+
+  // Embeds construidos esta corrida, agrupados por itemType para el digest
+  // final ("Item Update"). No se manda nada a Discord hasta el final del
+  // tick; el juego (notifyRoblox) si recibe cada evento en tiempo real.
+  const digestGroups = {}; // { Bundle: [embed, ...], Asset: [embed, ...] }
+  const pushEmbed = (itemType, embed) => {
+    const key = itemType || "Asset";
+    (digestGroups[key] ??= []).push(embed);
+  };
 
   // 1) Items nuevos (aparecen ahora, no estaban en el estado)
   const newItems = current.filter((i) => !state.known[i.id]);
@@ -248,16 +313,6 @@ async function tick() {
   for (const item of newItems) {
     console.log(`New item detected: ${item.name} (${item.id})`);
     const saleLabel = item.forSale === true ? "Yes" : item.forSale === false ? "No" : "Unknown";
-    const createdLabel = item.createdUtc
-      ? new Date(item.createdUtc).toLocaleString("en-US", {
-          year: "numeric",
-          month: "2-digit",
-          day: "2-digit",
-          hour: "2-digit",
-          minute: "2-digit",
-        })
-      : "Unknown";
-
     const isNew = item.itemStatus.some((s) => /new/i.test(s));
     const tagsLabel = item.itemStatus.length > 0 ? item.itemStatus.join(", ") : "None";
     // Si el item no esta a la venta, el precio que trae la API puede ser un
@@ -265,38 +320,58 @@ async function tick() {
     // vez de un numero enganoso.
     const priceLabel = item.forSale === false ? "None" : item.price != null ? `${item.price} R$` : "N/A";
     const thumbnailUrl = (await fetchThumbnailUrl(item.id)) || robloxThumbnailUrl(item.id);
+    const isHighValue = item.forSale !== false && item.price != null && item.price >= minValue;
 
-    await notifyDiscord({
-      title: `✨ New Item Detected - ${item.name}`,
+    pushEmbed(item.itemType, {
+      title: `✨ New Item - ${item.name}`,
       description: item.description || undefined,
       url: robloxItemUrl(item.id),
-      thumbnailUrl,
-      color: item.forSale === false ? 0xf1c40f : 0x2ecc71,
+      color: item.forSale === false ? 0xf1c40f : isHighValue ? 0xe67e22 : 0x2ecc71,
+      thumbnail: { url: thumbnailUrl },
+      timestamp: new Date().toISOString(),
       fields: [
         { name: "🆔 ID", value: String(item.id), inline: true },
+        { name: "📦 Type", value: item.itemType, inline: true },
         { name: "💵 Price", value: priceLabel, inline: true },
-        { name: "🔒 Limited?", value: item.isLimited ? "Yes" : "No", inline: true },
-        { name: "📅 Created", value: createdLabel, inline: true },
+        { name: "🔒 Limited?", value: item.isLimitedUnique ? "Yes (fixed qty)" : item.isLimited ? "Yes" : "No", inline: true },
         { name: "💸 On Sale?", value: saleLabel, inline: true },
         { name: "🆕 New Tag?", value: isNew ? "Yes" : "No", inline: true },
+        { name: "⏰ Sale Deadline", value: dateLabel(item.offSaleDeadline), inline: true },
+        { name: "📦 Units Available", value: qtyLabel(item.unitsAvailableForConsumption), inline: true },
+        { name: "🌟 High Value?", value: isHighValue ? "Yes" : "No", inline: true },
         { name: "💎 Item Tags", value: tagsLabel, inline: false },
-        {
-          name: "⭐ Favorites",
-          value: item.favoriteCount != null ? item.favoriteCount.toLocaleString("en-US") : "N/A",
-          inline: true,
-        },
       ],
     });
+
     await notifyRoblox({
       type: "ITEM_ADDED",
       id: item.id,
       name: item.name,
+      itemType: item.itemType,
       price: item.forSale === false ? null : item.price,
       forSale: item.forSale,
       isLimited: item.isLimited,
+      isLimitedUnique: item.isLimitedUnique,
+      offSaleDeadline: item.offSaleDeadline,
+      unitsAvailableForConsumption: item.unitsAvailableForConsumption,
+      unitsSold: 0,
+      isHighValue,
       favoriteCount: item.favoriteCount,
     });
-    state.known[item.id] = { name: item.name, price: item.price, forSale: item.forSale !== false };
+    state.known[item.id] = {
+      name: item.name,
+      price: item.price,
+      forSale: item.forSale !== false,
+      itemType: item.itemType,
+      offSaleDeadline: item.offSaleDeadline ?? null,
+      unitsAvailableForConsumption: item.unitsAvailableForConsumption ?? null,
+      // Cupo original visto la primera vez que detectamos el item. Sirve de
+      // base para calcular "unidades vendidas" en LimitedUnique. OJO: si el
+      // bot arranca despues de que ya se vendieron algunas, esto no sera el
+      // total real desde el lanzamiento, solo desde que el bot lo detecto.
+      originalUnits: item.unitsAvailableForConsumption ?? null,
+      isHighValue,
+    };
   }
 
   // 2) Items que ya conociamos pero ya no aparecen en la busqueda actual:
@@ -308,30 +383,102 @@ async function tick() {
   );
 
   if (missingIds.length > 0) {
-    const status = await checkStillForSale(missingIds.map(Number));
+    const status = await checkStillForSale(
+      missingIds.map((id) => ({ id: Number(id), itemType: state.known[id].itemType }))
+    );
     for (const id of missingIds) {
-      const stillForSale = status[id];
+      const stillForSale = status[id]?.purchasable;
       if (stillForSale === false) {
         const item = state.known[id];
         console.log(`Item removed from sale: ${item.name} (${id})`);
         const thumbnailUrl = (await fetchThumbnailUrl(id)) || robloxThumbnailUrl(id);
-        await notifyDiscord({
+
+        pushEmbed(item.itemType, {
           title: `📉 Item Removed From Sale - ${item.name}`,
           url: robloxItemUrl(id),
-          thumbnailUrl,
           color: 0xe74c3c,
+          thumbnail: { url: thumbnailUrl },
+          timestamp: new Date().toISOString(),
           fields: [
             { name: "🆔 ID", value: String(id), inline: true },
+            { name: "📦 Type", value: item.itemType, inline: true },
             { name: "💵 Last Price", value: item.price != null ? `${item.price} R$` : "N/A", inline: true },
           ],
         });
-        await notifyRoblox({ type: "ITEM_REMOVED", id: Number(id), name: item.name });
+        await notifyRoblox({ type: "ITEM_REMOVED", id: Number(id), name: item.name, itemType: item.itemType });
         state.known[id].forSale = false;
       }
       // si stillForSale es true o undefined (fallo de red), no hacemos nada:
       // seguimos considerandolo a la venta y lo reintentamos el proximo ciclo
     }
   }
+
+  // 3) Items ya conocidos que siguen a la venta: revisamos si cambio su
+  // fecha limite o su cupo restante (relevante para Limited/LimitedUnique
+  // con tiempo o cantidad fija de venta, ej. bundles de temporada). Tambien
+  // calculamos cuantas unidades se vendieron desde que el bot lo detecto.
+  const stillOnSaleItems = current.filter(
+    (i) => state.known[i.id] && state.known[i.id].forSale !== false
+  );
+
+  for (const item of stillOnSaleItems) {
+    const prev = state.known[item.id];
+    const deadlineChanged = (item.offSaleDeadline ?? null) !== (prev.offSaleDeadline ?? null);
+    const qtyChanged =
+      item.unitsAvailableForConsumption != null &&
+      item.unitsAvailableForConsumption !== prev.unitsAvailableForConsumption;
+    const soldOut = item.isLimitedUnique && item.unitsAvailableForConsumption === 0;
+
+    if (!deadlineChanged && !qtyChanged) continue;
+
+    const unitsSold =
+      item.isLimitedUnique && prev.originalUnits != null && item.unitsAvailableForConsumption != null
+        ? Math.max(0, prev.originalUnits - item.unitsAvailableForConsumption)
+        : null;
+
+    console.log(`Limit info updated: ${item.name} (${item.id})${soldOut ? " [SOLD OUT]" : ""}`);
+    const thumbnailUrl = (await fetchThumbnailUrl(item.id)) || robloxThumbnailUrl(item.id);
+
+    pushEmbed(item.itemType, {
+      title: soldOut ? `🚨 SOLD OUT - ${item.name}` : `⏳ Sale Limit Updated - ${item.name}`,
+      url: robloxItemUrl(item.id),
+      color: soldOut ? 0x992d22 : 0x9b59b6,
+      thumbnail: { url: thumbnailUrl },
+      timestamp: new Date().toISOString(),
+      fields: [
+        { name: "🆔 ID", value: String(item.id), inline: true },
+        { name: "📦 Type", value: item.itemType, inline: true },
+        { name: "⏰ Sale Deadline", value: dateLabel(item.offSaleDeadline), inline: true },
+        { name: "📦 Units Remaining", value: qtyLabel(item.unitsAvailableForConsumption), inline: true },
+        ...(unitsSold != null ? [{ name: "🛒 Units Sold (since tracked)", value: unitsSold.toLocaleString("en-US"), inline: true }] : []),
+      ],
+    });
+    await notifyRoblox({
+      type: soldOut ? "ITEM_SOLD_OUT" : "ITEM_LIMIT_UPDATE",
+      id: item.id,
+      name: item.name,
+      itemType: item.itemType,
+      offSaleDeadline: item.offSaleDeadline,
+      unitsAvailableForConsumption: item.unitsAvailableForConsumption,
+      unitsSold,
+    });
+
+    state.known[item.id].offSaleDeadline = item.offSaleDeadline ?? null;
+    state.known[item.id].unitsAvailableForConsumption = item.unitsAvailableForConsumption ?? null;
+  }
+
+  // Armar y mandar el digest agrupado: Bundles primero, luego el resto.
+  const typeOrder = ["Bundle", "Asset"];
+  const sortedTypes = Object.keys(digestGroups).sort(
+    (a, b) => typeOrder.indexOf(a) - typeOrder.indexOf(b)
+  );
+  const digestEmbeds = [];
+  for (const t of sortedTypes) {
+    const label = t === "Bundle" ? "📦 BUNDLES" : "🎩 ACCESSORIES / ITEMS";
+    digestEmbeds.push(sectionHeaderEmbed(label, digestGroups[t].length));
+    digestEmbeds.push(...digestGroups[t]);
+  }
+  await sendDigest(digestEmbeds);
 
   await saveState(state);
 }
@@ -355,3 +502,4 @@ async function main() {
 }
 
 main();
+    
