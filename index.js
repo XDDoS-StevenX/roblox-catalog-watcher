@@ -11,7 +11,15 @@ const {
   // derecho en el rol con "Modo desarrollador" activado -> Copiar ID). Si
   // no se define, los mensajes salen sin mencion, igual que antes.
   DISCORD_ROLE_ID,
+  // Legacy: query unico (accesorios). Se sigue soportando si no defines los
+  // nuevos CATALOG_QUERY_ACCESSORIES / CATALOG_QUERY_BUNDLES, para no romper
+  // el secret que ya tenias guardado.
   CATALOG_QUERY,
+  // Nuevos: queries separados por categoria. Se fusionan en cada tick sin
+  // duplicar items (por id). Si CATALOG_QUERY_ACCESSORIES no esta definido,
+  // se usa CATALOG_QUERY como fallback para esa categoria.
+  CATALOG_QUERY_ACCESSORIES,
+  CATALOG_QUERY_BUNDLES,
   POLL_INTERVAL_MS = "45000",
   MAX_PAGES = "3",
   // Precio (R$) desde el cual un item se marca como "alto valor" para el
@@ -20,16 +28,30 @@ const {
   FEATURED_MIN_PRICE = "1000",
 } = process.env;
 
+// Lista de queries a correr esta corrida, cada uno con una etiqueta para
+// los logs. Se descartan los que no tengan valor (ej. si no configuraste
+// CATALOG_QUERY_BUNDLES todavia, simplemente no se corre esa categoria).
+const CATALOG_QUERIES = [
+  { label: "accessories", query: CATALOG_QUERY_ACCESSORIES || CATALOG_QUERY },
+  { label: "bundles", query: CATALOG_QUERY_BUNDLES },
+].filter((q) => q.query);
+
 for (const [key, val] of Object.entries({
   ROBLOX_API_KEY,
   UNIVERSE_ID,
   DISCORD_WEBHOOK_URL,
-  CATALOG_QUERY,
 })) {
   if (!val) {
     console.error(`Falta la variable de entorno ${key}. Revisa tu .env`);
     process.exit(1);
   }
+}
+
+if (CATALOG_QUERIES.length === 0) {
+  console.error(
+    "Falta definir al menos un query de catalogo: CATALOG_QUERY_ACCESSORIES, CATALOG_QUERY_BUNDLES, o el legacy CATALOG_QUERY."
+  );
+  process.exit(1);
 }
 
 const STATE_FILE = path.resolve("./state.json");
@@ -40,6 +62,42 @@ const SEARCH_URL = "https://catalog.roproxy.com/v1/search/items/details";
 const DETAILS_URL = "https://catalog.roproxy.com/v1/catalog/items/details";
 const MESSAGING_URL = (universeId, topic) =>
   `https://apis.roblox.com/messaging-service/v1/universes/${universeId}/topics/${topic}`;
+
+// Mapa de assetType (numerico, campo "assetType" que trae la API de
+// catalogo) a nombre legible + parte del avatar donde se coloca. Cubre los
+// tipos de accesorio mas comunes en el catalogo oficial de Roblox. Si un
+// item trae un assetType que no esta en esta lista, se usa un fallback
+// generico (ver getAssetTypeInfo) en vez de romper.
+const ASSET_TYPE_INFO = {
+  8: { name: "Hat", bodySlot: "Head" },
+  17: { name: "Head", bodySlot: "Head (body part)" },
+  18: { name: "Face", bodySlot: "Head (body part)" },
+  19: { name: "Gear", bodySlot: "Held / Tool" },
+  41: { name: "Hair Accessory", bodySlot: "Head" },
+  42: { name: "Face Accessory", bodySlot: "Face" },
+  43: { name: "Neck Accessory", bodySlot: "Neck" },
+  44: { name: "Shoulder Accessory", bodySlot: "Shoulders" },
+  45: { name: "Front Accessory", bodySlot: "Front Torso" },
+  46: { name: "Back Accessory", bodySlot: "Back" },
+  47: { name: "Waist Accessory", bodySlot: "Waist" },
+  57: { name: "Ear Accessory", bodySlot: "Head (ears)" },
+  58: { name: "Eye Accessory", bodySlot: "Face (eyes)" },
+  64: { name: "T-Shirt Accessory", bodySlot: "Torso" },
+  65: { name: "Shirt Accessory", bodySlot: "Torso" },
+  66: { name: "Pants Accessory", bodySlot: "Legs" },
+  67: { name: "Jacket Accessory", bodySlot: "Torso" },
+  68: { name: "Sweater Accessory", bodySlot: "Torso" },
+  69: { name: "Shorts Accessory", bodySlot: "Legs" },
+  70: { name: "Left Shoe Accessory", bodySlot: "Feet (left)" },
+  71: { name: "Right Shoe Accessory", bodySlot: "Feet (right)" },
+  72: { name: "Dress/Skirt Accessory", bodySlot: "Legs" },
+  76: { name: "Eyebrow Accessory", bodySlot: "Face" },
+};
+
+function getAssetTypeInfo(assetTypeId) {
+  if (assetTypeId == null) return { name: null, bodySlot: null };
+  return ASSET_TYPE_INFO[assetTypeId] ?? { name: `Type ${assetTypeId}`, bodySlot: "Unknown" };
+}
 
 // ---------- Persistencia ----------
 // NOTA: en Render, un Background Worker sin "persistent disk" tiene
@@ -66,9 +124,9 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function fetchCatalogPage(cursor, attempt = 1) {
+async function fetchCatalogPage(query, cursor, attempt = 1) {
   const url = new URL(SEARCH_URL);
-  for (const [k, v] of new URLSearchParams(CATALOG_QUERY)) {
+  for (const [k, v] of new URLSearchParams(query)) {
     url.searchParams.set(k, v);
   }
   if (cursor) url.searchParams.set("cursor", cursor);
@@ -87,7 +145,7 @@ async function fetchCatalogPage(cursor, attempt = 1) {
     const retryAfter = Number(res.headers.get("retry-after")) || attempt * 5;
     console.log(`429 recibido, reintentando en ${retryAfter}s (intento ${attempt}/3)...`);
     await sleep(retryAfter * 1000);
-    return fetchCatalogPage(cursor, attempt + 1);
+    return fetchCatalogPage(query, cursor, attempt + 1);
   }
 
   if (!res.ok) {
@@ -97,69 +155,90 @@ async function fetchCatalogPage(cursor, attempt = 1) {
 }
 
 async function fetchCurrentItems() {
-  const items = [];
-  let cursor = undefined;
+  // Map en vez de array para poder deduplicar por id: si el mismo item
+  // apareciera en mas de un query (no deberia pasar entre accesorios y
+  // bundles, pero por seguridad), el primero que lo encuentra gana y los
+  // siguientes se ignoran.
+  const itemsById = new Map();
   const maxPages = Number(MAX_PAGES);
 
-  for (let page = 0; page < maxPages; page++) {
-    const data = await fetchCatalogPage(cursor);
-    for (const it of data.data ?? []) {
-      // Filtro de seguridad: solo items creados por la cuenta oficial de
-      // Roblox (creatorTargetId "1" — la cuenta oficial es tecnicamente un
-      // "User" con ese ID, no existe un CreatorType "Roblox" en la API).
-      const isOfficialRoblox = String(it.creatorTargetId) === "1";
-      if (!isOfficialRoblox) continue;
+  for (const { label, query } of CATALOG_QUERIES) {
+    let cursor = undefined;
+    let fetched = 0;
 
-      // El campo real que devuelve este endpoint es "priceStatus" (ej.
-      // "Free", "Off Sale", o vacio/undefined cuando tiene precio normal).
-      // Se revisan tambien nombres alternativos por si la API cambia.
-      let forSale;
-      if (typeof it.priceStatus === "string") {
-        forSale = !/off\s*sale/i.test(it.priceStatus);
-      } else if (typeof it.isForSale === "boolean") {
-        forSale = it.isForSale;
-      } else if (typeof it.purchasable === "boolean") {
-        forSale = it.purchasable;
-      } else if (typeof it.isPurchasable === "boolean") {
-        forSale = it.isPurchasable;
-      } else {
-        forSale = undefined;
+    for (let page = 0; page < maxPages; page++) {
+      const data = await fetchCatalogPage(query, cursor);
+      for (const it of data.data ?? []) {
+        if (itemsById.has(it.id)) continue;
+
+        // Filtro de seguridad: solo items creados por la cuenta oficial de
+        // Roblox (creatorTargetId "1" — la cuenta oficial es tecnicamente un
+        // "User" con ese ID, no existe un CreatorType "Roblox" en la API).
+        const isOfficialRoblox = String(it.creatorTargetId) === "1";
+        if (!isOfficialRoblox) continue;
+
+        // El campo real que devuelve este endpoint es "priceStatus" (ej.
+        // "Free", "Off Sale", o vacio/undefined cuando tiene precio normal).
+        // Se revisan tambien nombres alternativos por si la API cambia.
+        let forSale;
+        if (typeof it.priceStatus === "string") {
+          forSale = !/off\s*sale/i.test(it.priceStatus);
+        } else if (typeof it.isForSale === "boolean") {
+          forSale = it.isForSale;
+        } else if (typeof it.purchasable === "boolean") {
+          forSale = it.purchasable;
+        } else if (typeof it.isPurchasable === "boolean") {
+          forSale = it.isPurchasable;
+        } else {
+          forSale = undefined;
+        }
+
+        // assetType numerico (solo presente cuando itemType es "Asset", no
+        // en Bundles). Se resuelve a nombre legible ("Hat") y a la parte del
+        // avatar donde se coloca ("Head") via ASSET_TYPE_INFO.
+        const assetTypeId = typeof it.assetType === "number" ? it.assetType : null;
+        const { name: assetTypeName, bodySlot } = getAssetTypeInfo(assetTypeId);
+
+        itemsById.set(it.id, {
+          id: it.id,
+          name: it.name,
+          description: it.description ?? "",
+          price: it.price ?? null,
+          itemType: it.itemType ?? "Asset",
+          assetTypeId,
+          assetTypeName,
+          bodySlot,
+          forSale,
+          createdUtc: it.itemCreatedUtc ?? null,
+          isLimited: Array.isArray(it.itemRestrictions)
+            ? it.itemRestrictions.some((r) => /limited/i.test(r))
+            : false,
+          // "Limited" = solo tiempo/cupo dinamico. "LimitedUnique" = cupo fijo
+          // desde el inicio (coleccionable numerado). Guardamos cual es porque
+          // cambia como se interpreta unitsAvailableForConsumption.
+          isLimitedUnique: Array.isArray(it.itemRestrictions)
+            ? it.itemRestrictions.some((r) => /limitedunique/i.test(r))
+            : false,
+          itemStatus: Array.isArray(it.itemStatus) ? it.itemStatus : [],
+          favoriteCount: typeof it.favoriteCount === "number" ? it.favoriteCount : null,
+          // Fecha limite de venta (null si no tiene). Campo real de la API:
+          // "offSaleDeadline".
+          offSaleDeadline: it.offSaleDeadline ?? null,
+          // Cupo restante para items Limited/LimitedUnique. null = sin cupo
+          // fijo o el campo no vino en esta respuesta.
+          unitsAvailableForConsumption:
+            typeof it.unitsAvailableForConsumption === "number"
+              ? it.unitsAvailableForConsumption
+              : null,
+        });
+        fetched++;
       }
-
-      items.push({
-        id: it.id,
-        name: it.name,
-        description: it.description ?? "",
-        price: it.price ?? null,
-        itemType: it.itemType ?? "Asset",
-        forSale,
-        createdUtc: it.itemCreatedUtc ?? null,
-        isLimited: Array.isArray(it.itemRestrictions)
-          ? it.itemRestrictions.some((r) => /limited/i.test(r))
-          : false,
-        // "Limited" = solo tiempo/cupo dinamico. "LimitedUnique" = cupo fijo
-        // desde el inicio (coleccionable numerado). Guardamos cual es porque
-        // cambia como se interpreta unitsAvailableForConsumption.
-        isLimitedUnique: Array.isArray(it.itemRestrictions)
-          ? it.itemRestrictions.some((r) => /limitedunique/i.test(r))
-          : false,
-        itemStatus: Array.isArray(it.itemStatus) ? it.itemStatus : [],
-        favoriteCount: typeof it.favoriteCount === "number" ? it.favoriteCount : null,
-        // Fecha limite de venta (null si no tiene). Campo real de la API:
-        // "offSaleDeadline".
-        offSaleDeadline: it.offSaleDeadline ?? null,
-        // Cupo restante para items Limited/LimitedUnique. null = sin cupo
-        // fijo o el campo no vino en esta respuesta.
-        unitsAvailableForConsumption:
-          typeof it.unitsAvailableForConsumption === "number"
-            ? it.unitsAvailableForConsumption
-            : null,
-      });
+      cursor = data.nextPageCursor;
+      if (!cursor) break;
     }
-    cursor = data.nextPageCursor;
-    if (!cursor) break;
+    console.log(`Query "${label}": ${fetched} item(s) nuevo(s) en esta corrida`);
   }
-  return items;
+  return [...itemsById.values()];
 }
 
 // ---------- Roblox: revisar si items ya conocidos siguen a la venta ----------
@@ -321,6 +400,10 @@ async function tick() {
     const priceLabel = item.forSale === false ? "None" : item.price != null ? `${item.price} R$` : "N/A";
     const thumbnailUrl = (await fetchThumbnailUrl(item.id)) || robloxThumbnailUrl(item.id);
     const isHighValue = item.forSale !== false && item.price != null && item.price >= minValue;
+    // Para accesorios individuales mostramos el tipo especifico (ej. "Hat",
+    // "Neck Accessory"); para bundles no hay assetType, asi que cae al
+    // itemType general ("Bundle").
+    const typeLabel = item.assetTypeName ?? item.itemType;
 
     pushEmbed(item.itemType, {
       title: `✨ New Item - ${item.name}`,
@@ -331,7 +414,8 @@ async function tick() {
       timestamp: new Date().toISOString(),
       fields: [
         { name: "🆔 ID", value: String(item.id), inline: true },
-        { name: "📦 Type", value: item.itemType, inline: true },
+        { name: "📦 Type", value: typeLabel, inline: true },
+        { name: "🧍 Body Slot", value: item.bodySlot ?? "N/A", inline: true },
         { name: "💵 Price", value: priceLabel, inline: true },
         { name: "🔒 Limited?", value: item.isLimitedUnique ? "Yes (fixed qty)" : item.isLimited ? "Yes" : "No", inline: true },
         { name: "💸 On Sale?", value: saleLabel, inline: true },
@@ -348,6 +432,9 @@ async function tick() {
       id: item.id,
       name: item.name,
       itemType: item.itemType,
+      assetTypeId: item.assetTypeId,
+      assetTypeName: item.assetTypeName,
+      bodySlot: item.bodySlot,
       price: item.forSale === false ? null : item.price,
       forSale: item.forSale,
       isLimited: item.isLimited,
@@ -363,6 +450,9 @@ async function tick() {
       price: item.price,
       forSale: item.forSale !== false,
       itemType: item.itemType,
+      assetTypeId: item.assetTypeId,
+      assetTypeName: item.assetTypeName,
+      bodySlot: item.bodySlot,
       offSaleDeadline: item.offSaleDeadline ?? null,
       unitsAvailableForConsumption: item.unitsAvailableForConsumption ?? null,
       // Cupo original visto la primera vez que detectamos el item. Sirve de
@@ -392,114 +482,6 @@ async function tick() {
         const item = state.known[id];
         console.log(`Item removed from sale: ${item.name} (${id})`);
         const thumbnailUrl = (await fetchThumbnailUrl(id)) || robloxThumbnailUrl(id);
+        const typeLabel = item.assetTypeName ?? item.itemType;
 
-        pushEmbed(item.itemType, {
-          title: `📉 Item Removed From Sale - ${item.name}`,
-          url: robloxItemUrl(id),
-          color: 0xe74c3c,
-          thumbnail: { url: thumbnailUrl },
-          timestamp: new Date().toISOString(),
-          fields: [
-            { name: "🆔 ID", value: String(id), inline: true },
-            { name: "📦 Type", value: item.itemType, inline: true },
-            { name: "💵 Last Price", value: item.price != null ? `${item.price} R$` : "N/A", inline: true },
-          ],
-        });
-        await notifyRoblox({ type: "ITEM_REMOVED", id: Number(id), name: item.name, itemType: item.itemType });
-        state.known[id].forSale = false;
-      }
-      // si stillForSale es true o undefined (fallo de red), no hacemos nada:
-      // seguimos considerandolo a la venta y lo reintentamos el proximo ciclo
-    }
-  }
-
-  // 3) Items ya conocidos que siguen a la venta: revisamos si cambio su
-  // fecha limite o su cupo restante (relevante para Limited/LimitedUnique
-  // con tiempo o cantidad fija de venta, ej. bundles de temporada). Tambien
-  // calculamos cuantas unidades se vendieron desde que el bot lo detecto.
-  const stillOnSaleItems = current.filter(
-    (i) => state.known[i.id] && state.known[i.id].forSale !== false
-  );
-
-  for (const item of stillOnSaleItems) {
-    const prev = state.known[item.id];
-    const deadlineChanged = (item.offSaleDeadline ?? null) !== (prev.offSaleDeadline ?? null);
-    const qtyChanged =
-      item.unitsAvailableForConsumption != null &&
-      item.unitsAvailableForConsumption !== prev.unitsAvailableForConsumption;
-    const soldOut = item.isLimitedUnique && item.unitsAvailableForConsumption === 0;
-
-    if (!deadlineChanged && !qtyChanged) continue;
-
-    const unitsSold =
-      item.isLimitedUnique && prev.originalUnits != null && item.unitsAvailableForConsumption != null
-        ? Math.max(0, prev.originalUnits - item.unitsAvailableForConsumption)
-        : null;
-
-    console.log(`Limit info updated: ${item.name} (${item.id})${soldOut ? " [SOLD OUT]" : ""}`);
-    const thumbnailUrl = (await fetchThumbnailUrl(item.id)) || robloxThumbnailUrl(item.id);
-
-    pushEmbed(item.itemType, {
-      title: soldOut ? `🚨 SOLD OUT - ${item.name}` : `⏳ Sale Limit Updated - ${item.name}`,
-      url: robloxItemUrl(item.id),
-      color: soldOut ? 0x992d22 : 0x9b59b6,
-      thumbnail: { url: thumbnailUrl },
-      timestamp: new Date().toISOString(),
-      fields: [
-        { name: "🆔 ID", value: String(item.id), inline: true },
-        { name: "📦 Type", value: item.itemType, inline: true },
-        { name: "⏰ Sale Deadline", value: dateLabel(item.offSaleDeadline), inline: true },
-        { name: "📦 Units Remaining", value: qtyLabel(item.unitsAvailableForConsumption), inline: true },
-        ...(unitsSold != null ? [{ name: "🛒 Units Sold (since tracked)", value: unitsSold.toLocaleString("en-US"), inline: true }] : []),
-      ],
-    });
-    await notifyRoblox({
-      type: soldOut ? "ITEM_SOLD_OUT" : "ITEM_LIMIT_UPDATE",
-      id: item.id,
-      name: item.name,
-      itemType: item.itemType,
-      offSaleDeadline: item.offSaleDeadline,
-      unitsAvailableForConsumption: item.unitsAvailableForConsumption,
-      unitsSold,
-    });
-
-    state.known[item.id].offSaleDeadline = item.offSaleDeadline ?? null;
-    state.known[item.id].unitsAvailableForConsumption = item.unitsAvailableForConsumption ?? null;
-  }
-
-  // Armar y mandar el digest agrupado: Bundles primero, luego el resto.
-  const typeOrder = ["Bundle", "Asset"];
-  const sortedTypes = Object.keys(digestGroups).sort(
-    (a, b) => typeOrder.indexOf(a) - typeOrder.indexOf(b)
-  );
-  const digestEmbeds = [];
-  for (const t of sortedTypes) {
-    const label = t === "Bundle" ? "📦 BUNDLES" : "🎩 ACCESSORIES / ITEMS";
-    digestEmbeds.push(sectionHeaderEmbed(label, digestGroups[t].length));
-    digestEmbeds.push(...digestGroups[t]);
-  }
-  await sendDigest(digestEmbeds);
-
-  await saveState(state);
-}
-
-async function main() {
-  console.log("roblox-catalog-watcher iniciado");
-
-  // RUN_ONCE=true: corre un solo ciclo y termina (modo para GitHub Actions
-  // cron u otro scheduler externo, en vez de mantener un proceso 24/7).
-  if (process.env.RUN_ONCE === "true") {
-    await tick();
-    console.log("Ciclo unico completado, saliendo.");
-    return;
-  }
-
-  const interval = Number(POLL_INTERVAL_MS);
-  await tick().catch((err) => console.error("Error en tick:", err));
-  setInterval(() => {
-    tick().catch((err) => console.error("Error en tick:", err));
-  }, interval);
-}
-
-main();
-    
+      
