@@ -133,7 +133,9 @@
     "119934643965525": {
       "name": "Starwisp",
       "price": 0,
-      "forSale": true
+      "forSale": true,
+      "offSaleDeadline": null,
+      "unitsAvailableForConsumption": 0
     },
     "112236137274369": {
       "name": "Bling 67 Necklace",
@@ -393,7 +395,9 @@
     "112872125488872": {
       "name": "Activity Bag",
       "price": 140,
-      "forSale": true
+      "forSale": true,
+      "offSaleDeadline": null,
+      "unitsAvailableForConsumption": 0
     },
     "111773416976737": {
       "name": "Alebrije Pal",
@@ -428,7 +432,9 @@
     "124727635686515": {
       "name": "Sand Stupa Cap",
       "price": 95,
-      "forSale": true
+      "forSale": true,
+      "offSaleDeadline": null,
+      "unitsAvailableForConsumption": 0
     },
     "100570168794127": {
       "name": "Pondering Egg Hat",
