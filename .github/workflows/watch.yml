@@ -28,8 +28,12 @@ jobs:
           UNIVERSE_ID: ${{ secrets.UNIVERSE_ID }}
           MESSAGING_TOPIC: ${{ secrets.MESSAGING_TOPIC }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_ROLE_ID: ${{ secrets.DISCORD_ROLE_ID }}
           CATALOG_QUERY: ${{ secrets.CATALOG_QUERY }}
+          CATALOG_QUERY_ACCESSORIES: ${{ secrets.CATALOG_QUERY_ACCESSORIES }}
+          CATALOG_QUERY_BUNDLES: ${{ secrets.CATALOG_QUERY_BUNDLES }}
           MAX_PAGES: ${{ secrets.MAX_PAGES }}
+          FEATURED_MIN_PRICE: ${{ secrets.FEATURED_MIN_PRICE }}
           RUN_ONCE: "true"
         run: npm start
 
