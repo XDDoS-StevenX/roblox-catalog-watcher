@@ -127,6 +127,8 @@ async function fetchCurrentItems() {
         forSale,
         createdUtc: it.itemCreatedUtc ?? null,
         isLimited: Boolean(it.collectibleItemId),
+        itemStatus: Array.isArray(it.itemStatus) ? it.itemStatus : [],
+        favoriteCount: typeof it.favoriteCount === "number" ? it.favoriteCount : null,
       });
     }
     cursor = data.nextPageCursor;
@@ -237,6 +239,9 @@ async function tick() {
         })
       : "Desconocido";
 
+    const isNew = item.itemStatus.some((s) => /new/i.test(s));
+    const tagsLabel = item.itemStatus.length > 0 ? item.itemStatus.join(", ") : "Ninguno";
+
     await notifyDiscord({
       title: `✨ Nuevo objeto detectado - ${item.name}`,
       description: item.description || undefined,
@@ -249,6 +254,13 @@ async function tick() {
         { name: "🔒 Limitado?", value: item.isLimited ? "Si" : "No", inline: true },
         { name: "📅 Creado", value: createdLabel, inline: true },
         { name: "💸 A la venta?", value: saleLabel, inline: true },
+        { name: "🆕 Marcado como nuevo?", value: isNew ? "Si" : "No", inline: true },
+        { name: "💎 Tags del item", value: tagsLabel, inline: false },
+        {
+          name: "⭐ Favoritos",
+          value: item.favoriteCount != null ? item.favoriteCount.toLocaleString("es-ES") : "N/A",
+          inline: true,
+        },
       ],
     });
     await notifyRoblox({
@@ -257,6 +269,8 @@ async function tick() {
       name: item.name,
       price: item.price,
       forSale: item.forSale,
+      isLimited: item.isLimited,
+      favoriteCount: item.favoriteCount,
     });
     state.known[item.id] = { name: item.name, price: item.price, forSale: item.forSale !== false };
   }
@@ -316,3 +330,4 @@ async function main() {
 }
 
 main();
+      
