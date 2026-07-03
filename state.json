@@ -1548,5 +1548,6 @@
       "originalUnits": 0,
       "isHighValue": true
     }
-  }
+  },
+  "pendingGameSync": []
 }
