@@ -111,7 +111,7 @@ async function loadState() {
     const raw = await fs.readFile(STATE_FILE, "utf-8");
     return JSON.parse(raw);
   } catch {
-    return { known: {} }; // known[itemId] = { name, price, forSale: true }
+    return { known: {}, pendingGameSync: [] }; // known[itemId] = { name, price, forSale: true }
   }
 }
 
@@ -349,12 +349,48 @@ async function notifyRoblox(payload) {
   });
   if (!res.ok) {
     console.error(`MessagingService fallo: ${res.status} ${await res.text()}`);
+    return false;
   }
+  return true;
+}
+
+// Version que, si notifyRoblox falla (ej. "publish limit exceeded" cuando se
+// detectan muchos items de golpe), guarda el payload en state.pendingGameSync
+// para reintentarlo en la proxima corrida en vez de perderlo silenciosamente.
+// El item SI se sigue marcando como "known" (para no repetir el aviso de
+// Discord cada 5 min), pero el juego recibira el dato en cuanto se reintente
+// con exito.
+async function notifyRobloxWithRetry(state, payload) {
+  const ok = await notifyRoblox(payload);
+  if (!ok) {
+    state.pendingGameSync.push(payload);
+  }
+  // Pequena pausa entre publicaciones sucesivas para no ráfaguear el limite
+  // de MessagingService cuando se detectan muchos items en una sola corrida
+  // (ej. la primera vez que corre un query nuevo).
+  await sleep(350);
 }
 
 // ---------- Ciclo principal ----------
 async function tick() {
   const state = await loadState();
+  state.pendingGameSync ??= []; // compatibilidad con state.json de corridas viejas
+
+  // Reintentar primero los mensajes que no pudieron publicarse en la corrida
+  // anterior (ej. por "publish limit exceeded"), antes de generar mensajes
+  // nuevos. Los que vuelvan a fallar se quedan en la cola para la siguiente.
+  if (state.pendingGameSync.length > 0) {
+    console.log(`Reintentando ${state.pendingGameSync.length} mensaje(s) pendiente(s) de la corrida anterior...`);
+    const stillPending = [];
+    for (const payload of state.pendingGameSync) {
+      const ok = await notifyRoblox(payload);
+      if (!ok) stillPending.push(payload);
+      await sleep(350);
+    }
+    state.pendingGameSync = stillPending;
+    console.log(`Pendientes resueltos: ${state.pendingGameSync.length === 0 ? "todos" : `quedan ${stillPending.length}`}`);
+  }
+
   let current;
   try {
     current = await fetchCurrentItems();
@@ -427,7 +463,7 @@ async function tick() {
       ],
     });
 
-    await notifyRoblox({
+    await notifyRobloxWithRetry(state, {
       type: "ITEM_ADDED",
       id: item.id,
       name: item.name,
@@ -497,7 +533,7 @@ async function tick() {
             { name: "💵 Last Price", value: item.price != null ? `${item.price} R$` : "N/A", inline: true },
           ],
         });
-        await notifyRoblox({
+        await notifyRobloxWithRetry(state, {
           type: "ITEM_REMOVED",
           id: Number(id),
           name: item.name,
@@ -554,7 +590,7 @@ async function tick() {
         ...(unitsSold != null ? [{ name: "🛒 Units Sold (since tracked)", value: unitsSold.toLocaleString("en-US"), inline: true }] : []),
       ],
     });
-    await notifyRoblox({
+    await notifyRobloxWithRetry(state, {
       type: soldOut ? "ITEM_SOLD_OUT" : "ITEM_LIMIT_UPDATE",
       id: item.id,
       name: item.name,
