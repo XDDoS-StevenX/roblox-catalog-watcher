@@ -189,6 +189,15 @@ async function fetchCurrentItems() {
           forSale = it.purchasable;
         } else if (typeof it.isPurchasable === "boolean") {
           forSale = it.isPurchasable;
+        } else if (typeof it.price === "number") {
+          // Los Bundles (via este query especifico) no traen NINGUNO de los
+          // campos de arriba. Como mejor senal disponible, se infiere que
+          // esta a la venta si trae un precio numerico. Es una inferencia,
+          // no una confirmacion directa de la API — se marca como
+          // "inferred" (no "true") para que el embed lo muestre distinto
+          // ("Likely Yes") en vez de afirmarlo con la misma certeza que un
+          // campo explicito.
+          forSale = "inferred";
         } else {
           forSale = undefined;
         }
@@ -198,6 +207,14 @@ async function fetchCurrentItems() {
         // avatar donde se coloca ("Head") via ASSET_TYPE_INFO.
         const assetTypeId = typeof it.assetType === "number" ? it.assetType : null;
         const { name: assetTypeName, bodySlot } = getAssetTypeInfo(assetTypeId);
+
+        // Taxonomia (ej. "Animation Bundle"): solo presente en Bundles via
+        // este query. Es informacion real y util para el campo "Item Tags"
+        // del embed, a diferencia de itemStatus que casi siempre viene
+        // vacio para Bundles.
+        const taxonomyTags = Array.isArray(it.taxonomy)
+          ? it.taxonomy.map((t) => t.taxonomyName).filter(Boolean)
+          : [];
 
         itemsById.set(it.id, {
           id: it.id,
@@ -209,6 +226,7 @@ async function fetchCurrentItems() {
           assetTypeName,
           bodySlot,
           forSale,
+          taxonomyTags,
           createdUtc: it.itemCreatedUtc ?? null,
           isLimited: Array.isArray(it.itemRestrictions)
             ? it.itemRestrictions.some((r) => /limited/i.test(r))
@@ -288,9 +306,16 @@ function robloxItemUrl(assetId) {
   return `https://www.roblox.com/catalog/${assetId}`;
 }
 
-async function fetchThumbnailUrl(assetId) {
+async function fetchThumbnailUrl(id, itemType) {
   try {
-    const url = `https://thumbnails.roproxy.com/v1/assets?assetIds=${assetId}&size=150x150&format=png&isCircular=false`;
+    // Los bundles NO son assets — tienen su propio namespace de IDs y su
+    // propio endpoint de thumbnails. Usar el endpoint de assets con un ID de
+    // bundle devuelve una imagen equivocada (o la misma para todos), que es
+    // justo el bug reportado.
+    const url =
+      itemType === "Bundle"
+        ? `https://thumbnails.roproxy.com/v1/bundles/thumbnail?bundleIds=${id}&size=150x150&format=png&isCircular=false`
+        : `https://thumbnails.roproxy.com/v1/assets?assetIds=${id}&size=150x150&format=png&isCircular=false`;
     const res = await fetch(url, {
       headers: {
         "User-Agent":
@@ -400,7 +425,12 @@ async function tick() {
   }
 
   const currentIds = new Set(current.map((i) => String(i.id)));
-  const minValue = Number(FEATURED_MIN_PRICE);
+  // Number("") es 0, no NaN — si el secret FEATURED_MIN_PRICE no existe,
+  // GitHub Actions manda un string vacio (no "undefined"), lo que rompia el
+  // default del destructuring de arriba y dejaba minValue en 0 (por eso
+  // CUALQUIER item con precio se marcaba "High Value"). Este fallback cubre
+  // ese caso sin depender de que el secret exista.
+  const minValue = Number(FEATURED_MIN_PRICE) || 1000;
   const dateLabel = (ts) =>
     ts
       ? new Date(ts).toLocaleString("en-US", {
@@ -427,19 +457,32 @@ async function tick() {
 
   for (const item of newItems) {
     console.log(`New item detected: ${item.name} (${item.id})`);
-    const saleLabel = item.forSale === true ? "Yes" : item.forSale === false ? "No" : "Unknown";
+    const saleLabel =
+      item.forSale === true
+        ? "Yes"
+        : item.forSale === "inferred"
+        ? "Likely (inferred from price)"
+        : item.forSale === false
+        ? "No"
+        : "Unknown";
     const isNew = item.itemStatus.some((s) => /new/i.test(s));
-    const tagsLabel = item.itemStatus.length > 0 ? item.itemStatus.join(", ") : "None";
+    const allTags = [...item.itemStatus, ...(item.taxonomyTags ?? [])];
+    const tagsLabel = allTags.length > 0 ? allTags.join(", ") : "None";
     // Si el item no esta a la venta, el precio que trae la API puede ser un
     // valor residual sin sentido (ej. "1"). Mostramos "None" en ese caso en
     // vez de un numero enganoso.
     const priceLabel = item.forSale === false ? "None" : item.price != null ? `${item.price} R$` : "N/A";
-    const thumbnailUrl = (await fetchThumbnailUrl(item.id)) || robloxThumbnailUrl(item.id);
+    const thumbnailUrl = (await fetchThumbnailUrl(item.id, item.itemType)) || robloxThumbnailUrl(item.id);
     const isHighValue = item.forSale !== false && item.price != null && item.price >= minValue;
     // Para accesorios individuales mostramos el tipo especifico (ej. "Hat",
     // "Neck Accessory"); para bundles no hay assetType, asi que cae al
     // itemType general ("Bundle").
     const typeLabel = item.assetTypeName ?? item.itemType;
+    // "Units Available" solo tiene sentido para items Limited/LimitedUnique
+    // con cupo real. Para items normales este campo puede venir en 0 sin
+    // significar "agotado" — simplemente no aplica, y mostrar "0" ahi
+    // confundia (por eso el bug reportado).
+    const unitsLabel = item.isLimited || item.isLimitedUnique ? qtyLabel(item.unitsAvailableForConsumption) : "N/A (not limited)";
 
     pushEmbed(item.itemType, {
       title: `✨ New Item - ${item.name}`,
@@ -457,7 +500,7 @@ async function tick() {
         { name: "💸 On Sale?", value: saleLabel, inline: true },
         { name: "🆕 New Tag?", value: isNew ? "Yes" : "No", inline: true },
         { name: "⏰ Sale Deadline", value: dateLabel(item.offSaleDeadline), inline: true },
-        { name: "📦 Units Available", value: qtyLabel(item.unitsAvailableForConsumption), inline: true },
+        { name: "📦 Units Available", value: unitsLabel, inline: true },
         { name: "🌟 High Value?", value: isHighValue ? "Yes" : "No", inline: true },
         { name: "💎 Item Tags", value: tagsLabel, inline: false },
       ],
@@ -489,6 +532,9 @@ async function tick() {
       assetTypeId: item.assetTypeId,
       assetTypeName: item.assetTypeName,
       bodySlot: item.bodySlot,
+      taxonomyTags: item.taxonomyTags ?? [],
+      isLimited: item.isLimited,
+      isLimitedUnique: item.isLimitedUnique,
       offSaleDeadline: item.offSaleDeadline ?? null,
       unitsAvailableForConsumption: item.unitsAvailableForConsumption ?? null,
       // Cupo original visto la primera vez que detectamos el item. Sirve de
@@ -517,7 +563,7 @@ async function tick() {
       if (stillForSale === false) {
         const item = state.known[id];
         console.log(`Item removed from sale: ${item.name} (${id})`);
-        const thumbnailUrl = (await fetchThumbnailUrl(id)) || robloxThumbnailUrl(id);
+        const thumbnailUrl = (await fetchThumbnailUrl(id, item.itemType)) || robloxThumbnailUrl(id);
         const typeLabel = item.assetTypeName ?? item.itemType;
 
         pushEmbed(item.itemType, {
@@ -573,7 +619,7 @@ async function tick() {
         : null;
 
     console.log(`Limit info updated: ${item.name} (${item.id})${soldOut ? " [SOLD OUT]" : ""}`);
-    const thumbnailUrl = (await fetchThumbnailUrl(item.id)) || robloxThumbnailUrl(item.id);
+    const thumbnailUrl = (await fetchThumbnailUrl(item.id, item.itemType)) || robloxThumbnailUrl(item.id);
     const typeLabel = item.assetTypeName ?? item.itemType;
 
     pushEmbed(item.itemType, {
@@ -586,7 +632,7 @@ async function tick() {
         { name: "🆔 ID", value: String(item.id), inline: true },
         { name: "📦 Type", value: typeLabel, inline: true },
         { name: "⏰ Sale Deadline", value: dateLabel(item.offSaleDeadline), inline: true },
-        { name: "📦 Units Remaining", value: qtyLabel(item.unitsAvailableForConsumption), inline: true },
+        { name: "📦 Units Remaining", value: item.isLimited || item.isLimitedUnique ? qtyLabel(item.unitsAvailableForConsumption) : "N/A (not limited)", inline: true },
         ...(unitsSold != null ? [{ name: "🛒 Units Sold (since tracked)", value: unitsSold.toLocaleString("en-US"), inline: true }] : []),
       ],
     });
