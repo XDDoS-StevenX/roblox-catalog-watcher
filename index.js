@@ -515,7 +515,16 @@ async function tick() {
       assetTypeName: item.assetTypeName,
       bodySlot: item.bodySlot,
       price: item.forSale === false ? null : item.price,
-      forSale: item.forSale,
+      // Se manda un booleano limpio al juego (Lua no deberia tener que
+      // lidiar con el estado interno "inferred" que usamos solo para el
+      // texto del embed de Discord). Un valor no confirmado por la API se
+      // trata como "probablemente si" salvo que se demuestre lo contrario.
+      forSale: item.forSale !== false,
+      // Aparte, se informa si ese "true" es un dato confirmado por la API o
+      // una inferencia nuestra (ej. Bundles que no traen priceStatus). El
+      // juego puede usar esto para, por ejemplo, mostrar un badge "?" en
+      // vez de tratarlo con la misma certeza que un item confirmado.
+      forSaleConfirmed: item.forSale === true || item.forSale === false,
       isLimited: item.isLimited,
       isLimitedUnique: item.isLimitedUnique,
       offSaleDeadline: item.offSaleDeadline,
