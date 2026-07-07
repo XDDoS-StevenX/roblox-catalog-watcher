@@ -1547,6 +1547,78 @@
       "unitsAvailableForConsumption": 0,
       "originalUnits": 0,
       "isHighValue": true
+    },
+    "136603877073811": {
+      "name": "Cricket Rose Helmet",
+      "price": 95,
+      "forSale": true,
+      "itemType": "Asset",
+      "assetTypeId": 8,
+      "assetTypeName": "Hat",
+      "bodySlot": "Head",
+      "taxonomyTags": [
+        "Head Accessories"
+      ],
+      "isLimited": false,
+      "isLimitedUnique": false,
+      "offSaleDeadline": null,
+      "unitsAvailableForConsumption": 0,
+      "originalUnits": 0,
+      "isHighValue": false
+    },
+    "99258177076108": {
+      "name": "Galactic Cricket Bat",
+      "price": 140,
+      "forSale": true,
+      "itemType": "Asset",
+      "assetTypeId": 46,
+      "assetTypeName": "Back Accessory",
+      "bodySlot": "Back",
+      "taxonomyTags": [
+        "Back Accessories"
+      ],
+      "isLimited": false,
+      "isLimitedUnique": false,
+      "offSaleDeadline": null,
+      "unitsAvailableForConsumption": 0,
+      "originalUnits": 0,
+      "isHighValue": false
+    },
+    "112117298878309": {
+      "name": "Tanabata Cranes",
+      "price": 95,
+      "forSale": true,
+      "itemType": "Asset",
+      "assetTypeId": 8,
+      "assetTypeName": "Hat",
+      "bodySlot": "Head",
+      "taxonomyTags": [
+        "Head Accessories"
+      ],
+      "isLimited": false,
+      "isLimitedUnique": false,
+      "offSaleDeadline": null,
+      "unitsAvailableForConsumption": 0,
+      "originalUnits": 0,
+      "isHighValue": false
+    },
+    "74592109649129": {
+      "name": "Tanabata Bamboo Branch",
+      "price": 140,
+      "forSale": true,
+      "itemType": "Asset",
+      "assetTypeId": 46,
+      "assetTypeName": "Back Accessory",
+      "bodySlot": "Back",
+      "taxonomyTags": [
+        "Back Accessories"
+      ],
+      "isLimited": false,
+      "isLimitedUnique": false,
+      "offSaleDeadline": null,
+      "unitsAvailableForConsumption": 0,
+      "originalUnits": 0,
+      "isHighValue": false
     }
   },
   "pendingGameSync": []
