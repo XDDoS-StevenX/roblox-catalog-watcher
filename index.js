@@ -61,6 +61,13 @@ const STATE_FILE = path.resolve("./state.json");
 // muy usado por desarrolladores de Roblox para este mismo problema.
 const SEARCH_URL = "https://catalog.roproxy.com/v1/search/items/details";
 const DETAILS_URL = "https://catalog.roproxy.com/v1/catalog/items/details";
+// Roblox exige un token CSRF (header x-csrf-token) incluso para este
+// endpoint de solo lectura. El primer POST sin token (o con uno vencido)
+// responde 403 "XSRF token invalid" pero trae el token valido en el header
+// de la MISMA respuesta 403 — hay que reintentar una vez con ese token.
+// Se cachea en memoria porque el token es valido por un buen rato (no hay
+// que pedirlo en cada corrida).
+let cachedCsrfToken = null;
 const MESSAGING_URL = (universeId, topic) =>
   `https://apis.roblox.com/messaging-service/v1/universes/${universeId}/topics/${topic}`;
 
@@ -263,6 +270,28 @@ async function fetchCurrentItems() {
 // ---------- Roblox: revisar si items ya conocidos siguen a la venta ----------
 // items: [{ id, itemType }]. Antes esto forzaba itemType "Asset" para todo,
 // lo cual da resultados invalidos para bundles (itemType "Bundle").
+function detailsHeaders(csrfToken) {
+  return {
+    "Content-Type": "application/json",
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    Accept: "application/json",
+    Referer: "https://www.roblox.com/catalog",
+    Origin: "https://www.roblox.com",
+    ...(csrfToken ? { "x-csrf-token": csrfToken } : {}),
+  };
+}
+
+async function postDetailsChunk(chunk, csrfToken) {
+  return fetch(DETAILS_URL, {
+    method: "POST",
+    headers: detailsHeaders(csrfToken),
+    body: JSON.stringify({
+      items: chunk.map(({ id, itemType }) => ({ itemType: itemType || "Asset", id })),
+    }),
+  });
+}
+
 async function checkStillForSale(items) {
   if (items.length === 0) return {};
   const chunks = [];
@@ -272,27 +301,19 @@ async function checkStillForSale(items) {
 
   const result = {};
   for (const chunk of chunks) {
-    const res = await fetch(DETAILS_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        // Mismo User-Agent que SEARCH_URL. Se agregan tambien Referer/Origin
-        // imitando una peticion real desde la pagina del catalogo, por si el
-        // WAF de roproxy exige eso ademas del User-Agent en este endpoint POST.
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        Accept: "application/json",
-        Referer: "https://www.roblox.com/catalog",
-        Origin: "https://www.roblox.com",
-      },
-      body: JSON.stringify({
-        items: chunk.map(({ id, itemType }) => ({ itemType: itemType || "Asset", id })),
-      }),
-    });
+    let res = await postDetailsChunk(chunk, cachedCsrfToken);
+
+    // Token ausente o vencido: Roblox lo entrega en el header de esta misma
+    // respuesta 403. Se cachea y se reintenta UNA vez con el token nuevo.
+    if (res.status === 403) {
+      const freshToken = res.headers.get("x-csrf-token");
+      if (freshToken && freshToken !== cachedCsrfToken) {
+        cachedCsrfToken = freshToken;
+        res = await postDetailsChunk(chunk, cachedCsrfToken);
+      }
+    }
+
     if (!res.ok) {
-      // Antes solo se logueaba el status. Logueamos tambien el cuerpo real
-      // de la respuesta (truncado) para saber si es bloqueo de IP, rate
-      // limit, o un problema del payload — el status solo no lo distingue.
       const bodyText = await res.text().catch(() => "(no se pudo leer el cuerpo)");
       console.error(
         `Details check fallo: ${res.status} ${res.statusText} — body: ${bodyText.slice(0, 300)}`
