@@ -479,7 +479,7 @@ async function notifyRobloxWithRetry(state, payload) {
   // Pequena pausa entre publicaciones sucesivas para no ráfaguear el limite
   // de MessagingService cuando se detectan muchos items en una sola corrida
   // (ej. la primera vez que corre un query nuevo).
-  await sleep(350);
+  await sleep(1100);
 }
 
 // ---------- Ciclo principal ----------
@@ -496,7 +496,7 @@ async function tick() {
     for (const payload of state.pendingGameSync) {
       const ok = await notifyRoblox(payload);
       if (!ok) stillPending.push(payload);
-      await sleep(350);
+      await sleep(1100);
     }
     state.pendingGameSync = stillPending;
     console.log(`Pendientes resueltos: ${state.pendingGameSync.length === 0 ? "todos" : `quedan ${stillPending.length}`}`);
