@@ -276,19 +276,27 @@ async function checkStillForSale(items) {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        // Mismo User-Agent que SEARCH_URL: este endpoint POST especifico de
-        // roproxy responde 403 sin este header, aunque SEARCH_URL (GET) no
-        // lo necesitaba. Visto en produccion en Render el 2026-07-07.
+        // Mismo User-Agent que SEARCH_URL. Se agregan tambien Referer/Origin
+        // imitando una peticion real desde la pagina del catalogo, por si el
+        // WAF de roproxy exige eso ademas del User-Agent en este endpoint POST.
         "User-Agent":
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         Accept: "application/json",
+        Referer: "https://www.roblox.com/catalog",
+        Origin: "https://www.roblox.com",
       },
       body: JSON.stringify({
         items: chunk.map(({ id, itemType }) => ({ itemType: itemType || "Asset", id })),
       }),
     });
     if (!res.ok) {
-      console.error(`Details check fallo: ${res.status}`);
+      // Antes solo se logueaba el status. Logueamos tambien el cuerpo real
+      // de la respuesta (truncado) para saber si es bloqueo de IP, rate
+      // limit, o un problema del payload — el status solo no lo distingue.
+      const bodyText = await res.text().catch(() => "(no se pudo leer el cuerpo)");
+      console.error(
+        `Details check fallo: ${res.status} ${res.statusText} — body: ${bodyText.slice(0, 300)}`
+      );
       continue;
     }
     const data = await res.json();
