@@ -392,7 +392,7 @@ async function sendDigest(embeds) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        content: i === 0 ? (mention ? `<@&${DISCORD_ROLE_ID}> **Item Update**` : "**Item Update**") : undefined,
+        content: i === 0 ? (mention ? `<@&${DISCORD_ROLE_ID}>` : undefined) : undefined,
         allowed_mentions: mention ? { roles: [DISCORD_ROLE_ID] } : { parse: [] },
         embeds: chunks[i],
       }),
