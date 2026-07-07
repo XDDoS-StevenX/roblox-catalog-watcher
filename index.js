@@ -1,6 +1,7 @@
 import "dotenv/config";
 import fs from "node:fs/promises";
 import path from "node:path";
+import http from "node:http";
 
 const {
   ROBLOX_API_KEY,
@@ -678,6 +679,48 @@ async function tick() {
   await saveState(state);
 }
 
+// ---------- Estado del loop (para el endpoint de status/health-check) ----------
+// Se usa para: 1) que Render tenga algo a lo que responder en el puerto
+// asignado (requisito de los Web Services), y 2) que cron-job.org (o quien
+// sea) pueda hacer ping a este mismo endpoint para evitar que el free tier
+// se duerma tras ~15 min sin trafico HTTP. Mientras no se duerma, el proceso
+// nunca se reinicia y state.json en memoria/disco local sobrevive entre
+// ciclos (evita el problema de "todo se ve como nuevo" tras un restart).
+const tickStats = {
+  startedAt: new Date().toISOString(),
+  tickCount: 0,
+  lastTickAt: null,
+  lastTickMs: null,
+  lastError: null,
+  intervalMs: Number(POLL_INTERVAL_MS),
+};
+
+function startStatusServer() {
+  const port = Number(process.env.PORT) || 3000;
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, ...tickStats }, null, 2));
+  });
+  server.listen(port, () => {
+    console.log(`Status server escuchando en el puerto ${port} (para health-check y anti-sleep ping)`);
+  });
+}
+
+async function runTickTracked() {
+  const start = Date.now();
+  try {
+    await tick();
+    tickStats.lastError = null;
+  } catch (err) {
+    console.error("Error en tick:", err);
+    tickStats.lastError = String(err?.message ?? err);
+  } finally {
+    tickStats.tickCount += 1;
+    tickStats.lastTickAt = new Date().toISOString();
+    tickStats.lastTickMs = Date.now() - start;
+  }
+}
+
 async function main() {
   console.log("roblox-catalog-watcher iniciado");
 
@@ -689,11 +732,17 @@ async function main() {
     return;
   }
 
+  // Modo persistente (Render Web Service): levanta un servidor HTTP minimo
+  // (requisito de Render para no matar el servicio por no bindear $PORT, y
+  // ademas es el endpoint al que cron-job.org le hace ping para anti-sleep)
+  // y corre el ciclo en un setInterval propio, sin depender de ningun
+  // scheduler externo. Esto es lo que elimina el retraso de la cola de
+  // GitHub Actions cron.
+  startStatusServer();
+
   const interval = Number(POLL_INTERVAL_MS);
-  await tick().catch((err) => console.error("Error en tick:", err));
-  setInterval(() => {
-    tick().catch((err) => console.error("Error en tick:", err));
-  }, interval);
+  await runTickTracked();
+  setInterval(runTickTracked, interval);
 }
 
 main();
