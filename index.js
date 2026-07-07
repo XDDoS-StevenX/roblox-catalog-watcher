@@ -27,7 +27,17 @@ const {
   // panel de items destacados en el juego. Se manda al game via el campo
   // "isHighValue" en cada payload de MessagingService.
   FEATURED_MIN_PRICE = "1000",
+  // Opcional. Si se definen ambas, el estado se guarda en Upstash Redis
+  // (capa gratuita, sin tarjeta) en vez de en el archivo local — asi
+  // sobrevive a redeploys/restarts de Render, que tienen filesystem
+  // efimero. Se consiguen en https://console.upstash.com -> tu database
+  // -> "REST API" (URL y token, no el endpoint de Redis normal).
+  UPSTASH_REDIS_REST_URL,
+  UPSTASH_REDIS_REST_TOKEN,
 } = process.env;
+
+const STATE_KEY = "roblox-catalog-watcher:state";
+const USE_UPSTASH = Boolean(UPSTASH_REDIS_REST_URL && UPSTASH_REDIS_REST_TOKEN);
 
 // Lista de queries a correr esta corrida, cada uno con una etiqueta para
 // los logs. Se descartan los que no tengan valor (ej. si no configuraste
@@ -108,13 +118,41 @@ function getAssetTypeInfo(assetTypeId) {
 }
 
 // ---------- Persistencia ----------
-// NOTA: en Render, un Background Worker sin "persistent disk" tiene
-// filesystem efimero: si el proceso se reinicia (deploy, crash, etc.)
-// este archivo se pierde y el bot "redescubrira" todo como nuevo una vez.
-// Para produccion seria, agrega un Render Disk montado en /data y usa
-// STATE_FILE = "/data/state.json", o migra esto a una key-value store
-// externa (ej. Upstash Redis, gratis).
+// Si UPSTASH_REDIS_REST_URL/TOKEN estan definidos, el estado vive en Upstash
+// Redis (gratis, sobrevive a redeploys/restarts de Render). Si no, cae al
+// archivo local de siempre (efimero en Render, pero funciona igual en local
+// o en GitHub Actions, donde el propio workflow hace commit de state.json).
+async function upstashGet(key) {
+  const res = await fetch(`${UPSTASH_REDIS_REST_URL}/get/${encodeURIComponent(key)}`, {
+    headers: { Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}` },
+  });
+  if (!res.ok) throw new Error(`Upstash GET fallo: ${res.status}`);
+  const data = await res.json();
+  return data.result ?? null; // string (json) o null si la key no existe
+}
+
+async function upstashSet(key, value) {
+  const res = await fetch(`${UPSTASH_REDIS_REST_URL}/set/${encodeURIComponent(key)}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}`,
+      "Content-Type": "text/plain",
+    },
+    body: value,
+  });
+  if (!res.ok) throw new Error(`Upstash SET fallo: ${res.status}`);
+}
+
 async function loadState() {
+  if (USE_UPSTASH) {
+    try {
+      const raw = await upstashGet(STATE_KEY);
+      if (raw) return JSON.parse(raw);
+    } catch (err) {
+      console.error("Error leyendo estado de Upstash, se usa estado vacio:", err);
+    }
+    return { known: {}, pendingGameSync: [] };
+  }
   try {
     const raw = await fs.readFile(STATE_FILE, "utf-8");
     return JSON.parse(raw);
@@ -124,7 +162,17 @@ async function loadState() {
 }
 
 async function saveState(state) {
-  await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2));
+  const json = JSON.stringify(state, null, 2);
+  if (USE_UPSTASH) {
+    try {
+      await upstashSet(STATE_KEY, json);
+      return;
+    } catch (err) {
+      console.error("Error guardando estado en Upstash (se pierde este ciclo si el proceso reinicia):", err);
+      return;
+    }
+  }
+  await fs.writeFile(STATE_FILE, json);
 }
 
 // ---------- Roblox: descubrir items de la categoria ----------
