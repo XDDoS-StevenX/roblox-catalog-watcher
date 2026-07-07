@@ -274,7 +274,15 @@ async function checkStillForSale(items) {
   for (const chunk of chunks) {
     const res = await fetch(DETAILS_URL, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        // Mismo User-Agent que SEARCH_URL: este endpoint POST especifico de
+        // roproxy responde 403 sin este header, aunque SEARCH_URL (GET) no
+        // lo necesitaba. Visto en produccion en Render el 2026-07-07.
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        Accept: "application/json",
+      },
       body: JSON.stringify({
         items: chunk.map(({ id, itemType }) => ({ itemType: itemType || "Asset", id })),
       }),
