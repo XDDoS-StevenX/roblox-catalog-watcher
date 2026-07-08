@@ -899,7 +899,20 @@ function startStatusServer() {
   });
 }
 
+// Candado anti-solapamiento: si un tick tarda mas que POLL_INTERVAL_MS
+// (ej. varios items relisted/removidos seguidos, cada uno con su delay de
+// publicacion), el setInterval de mas abajo NO espera a que termine — asi
+// que sin este candado, dos tick() podrian correr en paralelo, cada uno
+// leyendo el mismo estado viejo y pisando el guardado del otro (esto
+// explicaba los "relisted" duplicados repitiendose cada 15s).
+let tickInProgress = false;
+
 async function runTickTracked() {
+  if (tickInProgress) {
+    console.log("Tick anterior aun en curso, se salta este intervalo para evitar solapamiento.");
+    return;
+  }
+  tickInProgress = true;
   const start = Date.now();
   try {
     await tick();
@@ -908,6 +921,7 @@ async function runTickTracked() {
     console.error("Error en tick:", err);
     tickStats.lastError = String(err?.message ?? err);
   } finally {
+    tickInProgress = false;
     tickStats.tickCount += 1;
     tickStats.lastTickAt = new Date().toISOString();
     tickStats.lastTickMs = Date.now() - start;
