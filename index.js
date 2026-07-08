@@ -78,6 +78,10 @@ const DETAILS_URL = "https://catalog.roproxy.com/v1/catalog/items/details";
 // Se cachea en memoria porque el token es valido por un buen rato (no hay
 // que pedirlo en cada corrida).
 let cachedCsrfToken = null;
+// Se loguea una sola vez, al primer chequeo exitoso, el objeto crudo de un
+// item para confirmar en logs que priceStatus (u otro campo) realmente
+// viene como se espera. Verificacion extra, no afecta la logica.
+let loggedSampleDetailsItem = false;
 const MESSAGING_URL = (universeId, topic) =>
   `https://apis.roblox.com/messaging-service/v1/universes/${universeId}/topics/${topic}`;
 
@@ -369,9 +373,31 @@ async function checkStillForSale(items) {
       continue;
     }
     const data = await res.json();
+    if (!loggedSampleDetailsItem && (data.data ?? []).length > 0) {
+      loggedSampleDetailsItem = true;
+      console.log("Muestra cruda de un item (verificacion de campos):", JSON.stringify(data.data[0]));
+    }
     for (const it of data.data ?? []) {
+      // Mismo orden de prioridad que fetchCurrentItems: priceStatus es el
+      // campo real confirmado de la API. "purchasable"/"isPurchasable" eran
+      // nombres de respaldo sin confirmar — al no existir en la respuesta
+      // real, el "?? false" anterior marcaba TODO como fuera de venta.
+      // Ahora, si no hay ninguna senal clara, se deja undefined (desconocido)
+      // en vez de asumir false, para no generar falsos "removed from sale".
+      let forSale;
+      if (typeof it.priceStatus === "string") {
+        forSale = !/off\s*sale/i.test(it.priceStatus);
+      } else if (typeof it.isForSale === "boolean") {
+        forSale = it.isForSale;
+      } else if (typeof it.purchasable === "boolean") {
+        forSale = it.purchasable;
+      } else if (typeof it.isPurchasable === "boolean") {
+        forSale = it.isPurchasable;
+      } else {
+        forSale = undefined;
+      }
       result[it.id] = {
-        purchasable: Boolean(it.purchasable ?? it.isPurchasable ?? false),
+        purchasable: forSale,
         offSaleDeadline: it.offSaleDeadline ?? null,
         unitsAvailableForConsumption:
           typeof it.unitsAvailableForConsumption === "number"
@@ -708,6 +734,51 @@ async function tick() {
       }
       // si stillForSale es true o undefined (fallo de red), no hacemos nada:
       // seguimos considerandolo a la venta y lo reintentamos el proximo ciclo
+    }
+  }
+
+  // 2.5) Autocorreccion: items marcados forSale:false (por un ITEM_REMOVED
+  // anterior, sea correcto o un falso positivo de un bug ya corregido) que
+  // en realidad siguen o volvieron a estar a la venta. Se revisan en la
+  // misma revalidacion periodica de 5 min que el paso 2, para no sumar
+  // llamadas extra a la API fuera de ese intervalo.
+  if (dueForFullRecheck) {
+    const offSaleIds = Object.keys(state.known).filter((id) => state.known[id].forSale === false);
+    if (offSaleIds.length > 0) {
+      const relistStatus = await checkStillForSale(
+        offSaleIds.map((id) => ({ id: Number(id), itemType: state.known[id].itemType }))
+      );
+      for (const id of offSaleIds) {
+        if (relistStatus[id]?.purchasable === true) {
+          const item = state.known[id];
+          console.log(`Item relisted (vuelve a la venta): ${item.name} (${id})`);
+          const thumbnailUrl = (await fetchThumbnailUrl(id, item.itemType)) || robloxThumbnailUrl(id);
+          const typeLabel = item.assetTypeName ?? item.itemType;
+
+          pushEmbed(item.itemType, {
+            title: `📈 Item Relisted - ${item.name}`,
+            url: robloxItemUrl(id),
+            color: 0x2ecc71,
+            thumbnail: { url: thumbnailUrl },
+            timestamp: new Date().toISOString(),
+            fields: [
+              { name: "🆔 ID", value: String(id), inline: true },
+              { name: "📦 Type", value: typeLabel, inline: true },
+              { name: "🧍 Body Slot", value: item.bodySlot ?? "N/A", inline: true },
+            ],
+          });
+          await notifyRobloxWithRetry(state, {
+            type: "ITEM_RELISTED",
+            id: Number(id),
+            name: item.name,
+            itemType: item.itemType,
+            assetTypeId: item.assetTypeId,
+            assetTypeName: item.assetTypeName,
+            bodySlot: item.bodySlot,
+          });
+          state.known[id].forSale = true;
+        }
+      }
     }
   }
 
