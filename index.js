@@ -641,13 +641,34 @@ async function tick() {
     };
   }
 
-  // 2) Items que ya conociamos pero ya no aparecen en la busqueda actual:
-  // pueden estar fuera de la primera(s) pagina(s) simplemente por orden,
-  // asi que los re-confirmamos contra el endpoint de detalles antes de
-  // avisar que salieron de venta (evita falsos positivos).
-  const missingIds = Object.keys(state.known).filter(
-    (id) => state.known[id].forSale && !currentIds.has(id)
+  // 2) Items que ya conociamos y hay que reconfirmar contra el endpoint de
+  // detalles. Dos casos se combinan aqui:
+  //   a) Items que ya no aparecen en la busqueda actual (pueden estar fuera
+  //      de la primera(s) pagina(s) simplemente por orden, asi que se
+  //      reconfirman antes de avisar que salieron de venta).
+  //   b) Cada FULL_RECHECK_INTERVAL_MS, TODOS los items marcados forSale:true
+  //      se reconfirman, incluso si siguen apareciendo en la busqueda — un
+  //      item puede volverse Limited (dejar de ser comprable directo) sin
+  //      desaparecer de los resultados de esa categoria, y (a) por si solo
+  //      nunca lo habria detectado.
+  const FULL_RECHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutos
+  const now = Date.now();
+  const dueForFullRecheck =
+    !state.lastFullRecheckAt || now - state.lastFullRecheckAt >= FULL_RECHECK_INTERVAL_MS;
+
+  const idsToVerifySet = new Set(
+    Object.keys(state.known).filter((id) => state.known[id].forSale && !currentIds.has(id))
   );
+  if (dueForFullRecheck) {
+    for (const id of Object.keys(state.known)) {
+      if (state.known[id].forSale) idsToVerifySet.add(id);
+    }
+    state.lastFullRecheckAt = now;
+    console.log(
+      `Revalidacion periodica completa: revisando ${idsToVerifySet.size} item(s) conocido(s) marcados a la venta`
+    );
+  }
+  const missingIds = [...idsToVerifySet];
 
   if (missingIds.length > 0) {
     const status = await checkStillForSale(
