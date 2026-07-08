@@ -82,6 +82,11 @@ let cachedCsrfToken = null;
 // item para confirmar en logs que priceStatus (u otro campo) realmente
 // viene como se espera. Verificacion extra, no afecta la logica.
 let loggedSampleDetailsItem = false;
+// Mitigacion inmediata anti-spam: aunque el guardado de estado fallara o se
+// retrasara, esto evita re-notificar el mismo "relisted" en cada tick dentro
+// de la vida de este proceso (se resetea si el proceso se reinicia, pero es
+// mejor que repetir cada 15s indefinidamente).
+const notifiedRelistedThisProcess = new Set();
 const MESSAGING_URL = (universeId, topic) =>
   `https://apis.roblox.com/messaging-service/v1/universes/${universeId}/topics/${topic}`;
 
@@ -151,7 +156,14 @@ async function loadState() {
   if (USE_UPSTASH) {
     try {
       const raw = await upstashGet(STATE_KEY);
-      if (raw) return JSON.parse(raw);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        console.log(
+          `Estado cargado de Upstash: ${Object.keys(parsed.known ?? {}).length} item(s) conocido(s), lastFullRecheckAt=${parsed.lastFullRecheckAt ?? "nunca"}`
+        );
+        return parsed;
+      }
+      console.log("Estado cargado de Upstash: vacio (key no existe todavia)");
     } catch (err) {
       console.error("Error leyendo estado de Upstash, se usa estado vacio:", err);
     }
@@ -170,6 +182,9 @@ async function saveState(state) {
   if (USE_UPSTASH) {
     try {
       await upstashSet(STATE_KEY, json);
+      console.log(
+        `Estado guardado en Upstash: ${Object.keys(state.known ?? {}).length} item(s) conocido(s), lastFullRecheckAt=${state.lastFullRecheckAt ?? "nunca"}, ${json.length} bytes`
+      );
       return;
     } catch (err) {
       console.error("Error guardando estado en Upstash (se pierde este ciclo si el proceso reinicia):", err);
@@ -749,7 +764,8 @@ async function tick() {
         offSaleIds.map((id) => ({ id: Number(id), itemType: state.known[id].itemType }))
       );
       for (const id of offSaleIds) {
-        if (relistStatus[id]?.purchasable === true) {
+        if (relistStatus[id]?.purchasable === true && !notifiedRelistedThisProcess.has(id)) {
+          notifiedRelistedThisProcess.add(id);
           const item = state.known[id];
           console.log(`Item relisted (vuelve a la venta): ${item.name} (${id})`);
           const thumbnailUrl = (await fetchThumbnailUrl(id, item.itemType)) || robloxThumbnailUrl(id);
