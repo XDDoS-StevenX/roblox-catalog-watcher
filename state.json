@@ -1619,8 +1619,46 @@
       "unitsAvailableForConsumption": 0,
       "originalUnits": 0,
       "isHighValue": false
+    },
+    "70393480252873": {
+      "name": "The Spark of Inspiration",
+      "price": 1,
+      "forSale": false,
+      "itemType": "Asset",
+      "assetTypeId": 8,
+      "assetTypeName": "Hat",
+      "bodySlot": "Head",
+      "taxonomyTags": [
+        "Head Accessories"
+      ],
+      "isLimited": false,
+      "isLimitedUnique": false,
+      "offSaleDeadline": null,
+      "unitsAvailableForConsumption": 0,
+      "originalUnits": 0,
+      "isHighValue": false
     }
   },
-  "pendingGameSync": [],
-  "lastFullRecheckAt": 1783615201363
+  "pendingGameSync": [
+    {
+      "type": "ITEM_ADDED",
+      "id": 70393480252873,
+      "name": "The Spark of Inspiration",
+      "itemType": "Asset",
+      "assetTypeId": 8,
+      "assetTypeName": "Hat",
+      "bodySlot": "Head",
+      "price": null,
+      "forSale": false,
+      "forSaleConfirmed": true,
+      "isLimited": false,
+      "isLimitedUnique": false,
+      "offSaleDeadline": null,
+      "unitsAvailableForConsumption": 0,
+      "unitsSold": 0,
+      "isHighValue": false,
+      "favoriteCount": 0
+    }
+  ],
+  "lastFullRecheckAt": 1783621539649
 }
