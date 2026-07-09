@@ -1637,28 +1637,62 @@
       "unitsAvailableForConsumption": 0,
       "originalUnits": 0,
       "isHighValue": false
-    }
-  },
-  "pendingGameSync": [
-    {
-      "type": "ITEM_ADDED",
-      "id": 70393480252873,
-      "name": "The Spark of Inspiration",
+    },
+    "82843736805790": {
+      "name": "Global Football",
+      "price": 1,
+      "forSale": false,
       "itemType": "Asset",
       "assetTypeId": 8,
       "assetTypeName": "Hat",
       "bodySlot": "Head",
-      "price": null,
-      "forSale": false,
-      "forSaleConfirmed": true,
+      "taxonomyTags": [
+        "Head Accessories"
+      ],
       "isLimited": false,
       "isLimitedUnique": false,
       "offSaleDeadline": null,
       "unitsAvailableForConsumption": 0,
-      "unitsSold": 0,
-      "isHighValue": false,
-      "favoriteCount": 0
+      "originalUnits": 0,
+      "isHighValue": false
+    },
+    "101578500081215": {
+      "name": "Oof Coffee Bag",
+      "price": 1,
+      "forSale": false,
+      "itemType": "Asset",
+      "assetTypeId": 47,
+      "assetTypeName": "Waist Accessory",
+      "bodySlot": "Waist",
+      "taxonomyTags": [
+        "Waist Accessories"
+      ],
+      "isLimited": false,
+      "isLimitedUnique": false,
+      "offSaleDeadline": null,
+      "unitsAvailableForConsumption": 0,
+      "originalUnits": 0,
+      "isHighValue": false
+    },
+    "86748427754353": {
+      "name": "The Rings of Creation",
+      "price": 1,
+      "forSale": false,
+      "itemType": "Asset",
+      "assetTypeId": 46,
+      "assetTypeName": "Back Accessory",
+      "bodySlot": "Back",
+      "taxonomyTags": [
+        "Back Accessories"
+      ],
+      "isLimited": false,
+      "isLimitedUnique": false,
+      "offSaleDeadline": null,
+      "unitsAvailableForConsumption": 0,
+      "originalUnits": 0,
+      "isHighValue": false
     }
-  ],
-  "lastFullRecheckAt": 1783621539649
+  },
+  "pendingGameSync": [],
+  "lastFullRecheckAt": 1783628253380
 }
