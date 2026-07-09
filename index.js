@@ -579,8 +579,50 @@ async function tick() {
     (digestGroups[key] ??= []).push(embed);
   };
 
-  // 1) Items nuevos (aparecen ahora, no estaban en el estado)
-  const newItems = current.filter((i) => !state.known[i.id]);
+  // 1) Items nuevos (aparecen ahora, no estaban en el estado).
+  // OJO: "nuevo para el bot" no es lo mismo que "nuevo en Roblox". Con
+  // SortType=6 (RecentlyCreated/RecentlyUpdated), items clasicos que Roblox
+  // toca en bloque (ej. migraciones de metadata) tambien suben al tope del
+  // ordenamiento y aparecen aqui la primera vez que el bot los ve, aunque
+  // tengan anios. Se filtran por itemCreatedUtc real antes de notificar: si
+  // el item es viejo, se guarda igual como conocido (para no reprocesarlo
+  // cada ciclo) pero SIN disparar notificacion a Discord/juego.
+  const ITEM_FRESHNESS_THRESHOLD_MS = 48 * 60 * 60 * 1000; // 48 horas
+  const allNewItems = current.filter((i) => !state.known[i.id]);
+  const newItems = [];
+
+  for (const item of allNewItems) {
+    const createdAt = item.createdUtc ? new Date(item.createdUtc).getTime() : null;
+    const ageMs = createdAt != null && !Number.isNaN(createdAt) ? Date.now() - createdAt : null;
+    const isStale = ageMs != null && ageMs > ITEM_FRESHNESS_THRESHOLD_MS;
+
+    if (isStale) {
+      console.log(
+        `Item antiguo detectado por primera vez (creado ${item.createdUtc}), se agrega como conocido sin notificar: ${item.name} (${item.id})`
+      );
+      // Se guarda como conocido "silenciosamente" para que no se re-evalue
+      // en cada tick, pero saltando todo el bloque de abajo (pushEmbed,
+      // notifyRobloxWithRetry): nunca genera notificacion.
+      state.known[item.id] = {
+        name: item.name,
+        price: item.price,
+        forSale: item.forSale !== false,
+        itemType: item.itemType,
+        assetTypeId: item.assetTypeId,
+        assetTypeName: item.assetTypeName,
+        bodySlot: item.bodySlot,
+        taxonomyTags: item.taxonomyTags ?? [],
+        isLimited: item.isLimited,
+        isLimitedUnique: item.isLimitedUnique,
+        offSaleDeadline: item.offSaleDeadline ?? null,
+        unitsAvailableForConsumption: item.unitsAvailableForConsumption ?? null,
+        originalUnits: item.unitsAvailableForConsumption ?? null,
+        isHighValue: false,
+      };
+      continue;
+    }
+    newItems.push(item);
+  }
 
   for (const item of newItems) {
     console.log(`New item detected: ${item.name} (${item.id})`);
