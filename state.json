@@ -1691,8 +1691,26 @@
       "unitsAvailableForConsumption": 0,
       "originalUnits": 0,
       "isHighValue": false
+    },
+    "120575639902300": {
+      "name": "Moonwisp",
+      "price": 1,
+      "forSale": false,
+      "itemType": "Asset",
+      "assetTypeId": 44,
+      "assetTypeName": "Shoulder Accessory",
+      "bodySlot": "Shoulders",
+      "taxonomyTags": [
+        "Shoulder Accessories"
+      ],
+      "isLimited": false,
+      "isLimitedUnique": false,
+      "offSaleDeadline": null,
+      "unitsAvailableForConsumption": 0,
+      "originalUnits": 0,
+      "isHighValue": false
     }
   },
   "pendingGameSync": [],
-  "lastFullRecheckAt": 1784303504006
+  "lastFullRecheckAt": 1784307284745
 }
