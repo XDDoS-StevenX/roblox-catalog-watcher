@@ -1174,7 +1174,7 @@
     "103238843491175": {
       "name": "Tailflipped Hat",
       "price": 1000,
-      "forSale": true,
+      "forSale": false,
       "itemType": "Asset",
       "assetTypeId": 8,
       "assetTypeName": "Hat",
@@ -1802,5 +1802,5 @@
     }
   },
   "pendingGameSync": [],
-  "lastFullRecheckAt": 1784496528901
+  "lastFullRecheckAt": 1784500046823
 }
