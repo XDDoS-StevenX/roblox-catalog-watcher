@@ -1,0 +1,45 @@
+name: Catalog Watcher Tick
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: catalog-watcher-tick
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        # Se usa "npm install" en vez de "npm ci" porque el repo no tiene
+        # package-lock.json (npm ci lo exige y falla sin el). Con una sola
+        # dependencia (dotenv), npm install es igual de rapido y no hace
+        # falta generar/commitear un lockfile solo para esto.
+        run: npm install --omit=dev
+
+      - name: Run single tick
+        run: node index.js
+        env:
+          RUN_ONCE: "true"
+          ROBLOX_API_KEY: ${{ secrets.ROBLOX_API_KEY }}
+          UNIVERSE_ID: ${{ secrets.UNIVERSE_ID }}
+          MESSAGING_TOPIC: ${{ secrets.MESSAGING_TOPIC }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_ROLE_ID: ${{ secrets.DISCORD_ROLE_ID }}
+          CATALOG_QUERY: ${{ secrets.CATALOG_QUERY }}
+          CATALOG_QUERY_BUNDLES: ${{ secrets.CATALOG_QUERY_BUNDLES }}
+          MAX_PAGES: ${{ secrets.MAX_PAGES }}
+          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
+          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
