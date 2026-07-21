@@ -371,13 +371,24 @@ async function checkStillForSale(items) {
     let res = await postDetailsChunk(chunk, cachedCsrfToken);
 
     // Token ausente o vencido: Roblox lo entrega en el header de esta misma
-    // respuesta 403. Se cachea y se reintenta UNA vez con el token nuevo.
-    if (res.status === 403) {
+    // respuesta 403. Se cachea y se reintenta con el token nuevo.
+    //
+    // NOTA (julio 2026): antes esto reintentaba una sola vez, lo cual
+    // andaba bien en Render porque el proceso vivia dias/semanas y el
+    // token cacheado se reusaba en decenas de ciclos entre cada
+    // revalidacion completa (FULL_RECHECK_INTERVAL_MS = 5min). Al correr
+    // como proceso nuevo en cada ejecucion (GitHub Actions cada 5min), la
+    // revalidacion completa se dispara en TODAS las corridas, asi que esta
+    // renegociacion de token tiene que salir bien siempre, no de vez en
+    // cuando. Se subio a hasta 3 intentos totales para tolerar el caso en
+    // que Roblox tarde un round extra en estabilizar el token.
+    let attempts = 0;
+    while (res.status === 403 && attempts < 2) {
+      attempts += 1;
       const freshToken = res.headers.get("x-csrf-token");
-      if (freshToken && freshToken !== cachedCsrfToken) {
-        cachedCsrfToken = freshToken;
-        res = await postDetailsChunk(chunk, cachedCsrfToken);
-      }
+      if (!freshToken || freshToken === cachedCsrfToken) break;
+      cachedCsrfToken = freshToken;
+      res = await postDetailsChunk(chunk, cachedCsrfToken);
     }
 
     if (!res.ok) {
