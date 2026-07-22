@@ -3419,8 +3419,46 @@
       "unitsAvailableForConsumption": 0,
       "originalUnits": 0,
       "isHighValue": false
+    },
+    "139579276427743": {
+      "name": "Cloud Nine",
+      "price": 200,
+      "forSale": true,
+      "itemType": "Asset",
+      "assetTypeId": 92,
+      "assetTypeName": "Type 92",
+      "bodySlot": "Unknown",
+      "taxonomyTags": [
+        "Background"
+      ],
+      "isLimited": false,
+      "isLimitedUnique": false,
+      "offSaleDeadline": null,
+      "unitsAvailableForConsumption": 0,
+      "originalUnits": 0,
+      "isHighValue": false
     }
   },
-  "pendingGameSync": [],
-  "lastFullRecheckAt": 1784738526586
+  "pendingGameSync": [
+    {
+      "type": "ITEM_ADDED",
+      "id": 139579276427743,
+      "name": "Cloud Nine",
+      "itemType": "Asset",
+      "assetTypeId": 92,
+      "assetTypeName": "Type 92",
+      "bodySlot": "Unknown",
+      "price": 200,
+      "forSale": true,
+      "forSaleConfirmed": false,
+      "isLimited": false,
+      "isLimitedUnique": false,
+      "offSaleDeadline": null,
+      "unitsAvailableForConsumption": 0,
+      "unitsSold": 0,
+      "isHighValue": false,
+      "favoriteCount": 0
+    }
+  ],
+  "lastFullRecheckAt": 1784742809538
 }
