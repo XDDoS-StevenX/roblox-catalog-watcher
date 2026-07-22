@@ -3401,8 +3401,26 @@
       "unitsAvailableForConsumption": 0,
       "originalUnits": 0,
       "isHighValue": false
+    },
+    "9244021842": {
+      "name": "Side Part - Black",
+      "price": 0,
+      "forSale": true,
+      "itemType": "Asset",
+      "assetTypeId": 41,
+      "assetTypeName": "Hair Accessory",
+      "bodySlot": "Head",
+      "taxonomyTags": [
+        "Hair"
+      ],
+      "isLimited": false,
+      "isLimitedUnique": false,
+      "offSaleDeadline": null,
+      "unitsAvailableForConsumption": 0,
+      "originalUnits": 0,
+      "isHighValue": false
     }
   },
   "pendingGameSync": [],
-  "lastFullRecheckAt": 1784732882817
+  "lastFullRecheckAt": 1784738526586
 }
