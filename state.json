@@ -3635,8 +3635,26 @@
       "unitsAvailableForConsumption": 0,
       "originalUnits": 0,
       "isHighValue": false
+    },
+    "121199209890990": {
+      "name": "Prism Skies",
+      "price": 0,
+      "forSale": true,
+      "itemType": "Asset",
+      "assetTypeId": 92,
+      "assetTypeName": "Type 92",
+      "bodySlot": "Unknown",
+      "taxonomyTags": [
+        "Background"
+      ],
+      "isLimited": false,
+      "isLimitedUnique": false,
+      "offSaleDeadline": null,
+      "unitsAvailableForConsumption": 0,
+      "originalUnits": 0,
+      "isHighValue": false
     }
   },
   "pendingGameSync": [],
-  "lastFullRecheckAt": 1784836179728
+  "lastFullRecheckAt": 1784839264929
 }
