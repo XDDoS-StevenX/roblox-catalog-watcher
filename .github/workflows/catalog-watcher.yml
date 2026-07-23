@@ -39,6 +39,7 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           DISCORD_ROLE_ID: ${{ secrets.DISCORD_ROLE_ID }}
           CATALOG_QUERY: ${{ secrets.CATALOG_QUERY }}
+          CATALOG_QUERY_V2_BROAD: ${{ secrets.CATALOG_QUERY_V2_BROAD }}
           CATALOG_QUERY_BUNDLES: ${{ secrets.CATALOG_QUERY_BUNDLES }}
           MAX_PAGES: ${{ secrets.MAX_PAGES }}
           UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
