@@ -21,6 +21,13 @@ const {
   // se usa CATALOG_QUERY como fallback para esa categoria.
   CATALOG_QUERY_ACCESSORIES,
   CATALOG_QUERY_BUNDLES,
+  // Opcional (julio 2026). Query nueva contra el endpoint v2 del catalogo
+  // (descubierto capturando la request real de la pagina web con
+  // DevTools). Corre en paralelo a las de v1 de arriba -- ver comentario
+  // junto a SEARCH_URL_V2 mas abajo para el contexto completo. Formato
+  // de ejemplo (parametros v2, distintos a los de v1):
+  // "taxonomy=XXXXXXXXXX&creatorName=Roblox&salesTypeFilter=1&sortType=3&includeNotForSale=true&limit=120"
+  CATALOG_QUERY_V2_BROAD,
   POLL_INTERVAL_MS = "45000",
   MAX_PAGES = "3",
   // Precio (R$) desde el cual un item se marca como "alto valor" para el
@@ -43,8 +50,14 @@ const USE_UPSTASH = Boolean(UPSTASH_REDIS_REST_URL && UPSTASH_REDIS_REST_TOKEN);
 // los logs. Se descartan los que no tengan valor (ej. si no configuraste
 // CATALOG_QUERY_BUNDLES todavia, simplemente no se corre esa categoria).
 const CATALOG_QUERIES = [
-  { label: "accessories", query: CATALOG_QUERY_ACCESSORIES || CATALOG_QUERY },
-  { label: "bundles", query: CATALOG_QUERY_BUNDLES },
+  { label: "accessories", query: CATALOG_QUERY_ACCESSORIES || CATALOG_QUERY, apiVersion: "v1" },
+  { label: "bundles", query: CATALOG_QUERY_BUNDLES, apiVersion: "v1" },
+  // Query nueva (opcional) contra el endpoint v2 descubierto en julio 2026.
+  // Corre EN PARALELO a las de v1 de arriba, no las reemplaza. Pensada
+  // para agarrar tipos de item nuevos que v1 todavia no indexa bien (ej.
+  // "Background"). Si CATALOG_QUERY_V2_BROAD no esta configurado, se
+  // salta sin romper nada (mismo patron que CATALOG_QUERY_BUNDLES).
+  { label: "v2-broad", query: CATALOG_QUERY_V2_BROAD, apiVersion: "v2" },
 ].filter((q) => q.query);
 
 for (const [key, val] of Object.entries({
@@ -70,6 +83,19 @@ const STATE_FILE = path.resolve("./state.json");
 // las IPs compartidas de GitHub Actions. roproxy es un espejo comunitario
 // muy usado por desarrolladores de Roblox para este mismo problema.
 const SEARCH_URL = "https://catalog.roproxy.com/v1/search/items/details";
+// v2 (julio 2026): descubierto capturando con DevTools la request real que
+// hace la pagina web del catalogo (Category/CreatorTargetId/SortType de v1
+// se reemplazan por taxonomy/creatorName/salesTypeFilter/sortType en v2).
+// Se agrega COMO QUERY ADICIONAL, en paralelo a las de v1 que ya
+// funcionaban bien -- no se reemplaza nada, para no arriesgar perder
+// cobertura de lo que ya detectaba bien. v2 permite Limit hasta 120 (vs
+// el maximo de 30 de v1), y su indice parece incluir tipos de item mas
+// nuevos (ej. taxonomia "Background") que el buscador v1 no encontraba
+// -- confirmado con un caso real: item id 101873719747781, tipo
+// "Background", visible en la busqueda de la pagina web (v2) pero
+// ausente en v1 incluso consultando directo a catalog.roblox.com sin
+// proxy de por medio.
+const SEARCH_URL_V2 = "https://catalog.roproxy.com/v2/search/items/details";
 const DETAILS_URL = "https://catalog.roproxy.com/v1/catalog/items/details";
 // Roblox exige un token CSRF (header x-csrf-token) incluso para este
 // endpoint de solo lectura. El primer POST sin token (o con uno vencido)
@@ -199,8 +225,8 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function fetchCatalogPage(query, cursor, attempt = 1) {
-  const url = new URL(SEARCH_URL);
+async function fetchCatalogPage(query, cursor, baseUrl = SEARCH_URL, attempt = 1) {
+  const url = new URL(baseUrl);
   for (const [k, v] of new URLSearchParams(query)) {
     url.searchParams.set(k, v);
   }
@@ -220,7 +246,7 @@ async function fetchCatalogPage(query, cursor, attempt = 1) {
     const retryAfter = Number(res.headers.get("retry-after")) || attempt * 5;
     console.log(`429 recibido, reintentando en ${retryAfter}s (intento ${attempt}/3)...`);
     await sleep(retryAfter * 1000);
-    return fetchCatalogPage(query, cursor, attempt + 1);
+    return fetchCatalogPage(query, cursor, baseUrl, attempt + 1);
   }
 
   if (!res.ok) {
@@ -237,12 +263,13 @@ async function fetchCurrentItems() {
   const itemsById = new Map();
   const maxPages = Number(MAX_PAGES);
 
-  for (const { label, query } of CATALOG_QUERIES) {
+  for (const { label, query, apiVersion } of CATALOG_QUERIES) {
     let cursor = undefined;
     let fetched = 0;
+    const baseUrl = apiVersion === "v2" ? SEARCH_URL_V2 : SEARCH_URL;
 
     for (let page = 0; page < maxPages; page++) {
-      const data = await fetchCatalogPage(query, cursor);
+      const data = await fetchCatalogPage(query, cursor, baseUrl);
       for (const it of data.data ?? []) {
         if (itemsById.has(it.id)) continue;
 
