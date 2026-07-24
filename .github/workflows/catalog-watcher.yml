@@ -44,3 +44,4 @@ jobs:
           MAX_PAGES: ${{ secrets.MAX_PAGES }}
           UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
           UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
+          CATALOG_QUERY_BUNDLES_V2: ${{ secrets.CATALOG_QUERY_BUNDLES_V2 }}
