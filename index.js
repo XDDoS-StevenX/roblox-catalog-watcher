@@ -28,6 +28,13 @@ const {
   // de ejemplo (parametros v2, distintos a los de v1):
   // "taxonomy=XXXXXXXXXX&creatorName=Roblox&salesTypeFilter=1&sortType=3&includeNotForSale=true&limit=120"
   CATALOG_QUERY_V2_BROAD,
+  // Opcional (julio 2026). Igual que CATALOG_QUERY_V2_BROAD pero con la
+  // taxonomy especifica de Bundles ("Characters", id kfHzJwaNYM8s2CWRqYUhRa)
+  // -- confirmado con DevTools que bundles usa una taxonomy DISTINTA a la
+  // de accesorios/backgrounds, asi que no hay un query v2 "universal" que
+  // cubra todas las categorias con un solo taxonomy id; hace falta una
+  // query v2 por categoria, igual que en v1.
+  CATALOG_QUERY_BUNDLES_V2,
   POLL_INTERVAL_MS = "45000",
   MAX_PAGES = "3",
   // Precio (R$) desde el cual un item se marca como "alto valor" para el
@@ -58,6 +65,11 @@ const CATALOG_QUERIES = [
   // "Background"). Si CATALOG_QUERY_V2_BROAD no esta configurado, se
   // salta sin romper nada (mismo patron que CATALOG_QUERY_BUNDLES).
   { label: "v2-broad", query: CATALOG_QUERY_V2_BROAD, apiVersion: "v2" },
+  // Bundles vía v2 (julio 2026) -- misma logica que v2-broad pero con
+  // taxonomy de Bundles/Characters. Corre en paralelo a "bundles" (v1) de
+  // arriba, no lo reemplaza -- mismo criterio conservador usado con
+  // v2-broad.
+  { label: "bundles-v2", query: CATALOG_QUERY_BUNDLES_V2, apiVersion: "v2" },
 ].filter((q) => q.query);
 
 for (const [key, val] of Object.entries({
