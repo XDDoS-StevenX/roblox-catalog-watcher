@@ -400,21 +400,26 @@ async function checkStillForSale(items) {
     // Token ausente o vencido: Roblox lo entrega en el header de esta misma
     // respuesta 403. Se cachea y se reintenta con el token nuevo.
     //
-    // NOTA (julio 2026): antes esto reintentaba una sola vez, lo cual
-    // andaba bien en Render porque el proceso vivia dias/semanas y el
-    // token cacheado se reusaba en decenas de ciclos entre cada
-    // revalidacion completa (FULL_RECHECK_INTERVAL_MS = 5min). Al correr
-    // como proceso nuevo en cada ejecucion (GitHub Actions cada 5min), la
-    // revalidacion completa se dispara en TODAS las corridas, asi que esta
-    // renegociacion de token tiene que salir bien siempre, no de vez en
-    // cuando. Se subio a hasta 3 intentos totales para tolerar el caso en
-    // que Roblox tarde un round extra en estabilizar el token.
+    // NOTA (julio 2026, v2): el fix anterior (subir de 1 a 3 intentos)
+    // seguia fallando de forma intermitente porque el loop se rendia en
+    // cuanto el header "x-csrf-token" del reintento devolvia EL MISMO
+    // valor que el que ya se habia probado -- pero Roblox a veces emite
+    // el mismo token en 403 consecutivos muy rapidos entre si (parece
+    // tener su propia ventana de cache de milisegundos para la emision
+    // del token), sin que eso signifique que el token sea invalido de
+    // forma permanente. Rendirse en ese caso tiraba a la basura intentos
+    // que todavia quedaban disponibles. Fix: solo abortar si Roblox NO
+    // manda ningun token en absoluto (ahi si no hay nada mas que probar).
+    // Si manda un token (igual o distinto al anterior), se reintenta
+    // igual, con una pausa corta entre intentos para darle tiempo a que
+    // el token realmente rote del lado de Roblox.
     let attempts = 0;
-    while (res.status === 403 && attempts < 2) {
+    while (res.status === 403 && attempts < 3) {
       attempts += 1;
       const freshToken = res.headers.get("x-csrf-token");
-      if (!freshToken || freshToken === cachedCsrfToken) break;
+      if (!freshToken) break;
       cachedCsrfToken = freshToken;
+      await sleep(300 * attempts); // pausa creciente: 300ms, 600ms, 900ms
       res = await postDetailsChunk(chunk, cachedCsrfToken);
     }
 
