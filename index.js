@@ -1028,6 +1028,29 @@ async function runTickTracked() {
 async function main() {
   console.log("roblox-catalog-watcher iniciado");
 
+  // DEBUG_CHECK_IDS (opcional, julio 2026): modo de solo lectura para
+  // diagnosticar si uno o mas IDs puntuales ya estan en state.known,
+  // sin tocar nada (no agrega, no notifica, no guarda). Util para
+  // responder "por que no me llego X a Discord" sin adivinar -- confirma
+  // si el bot nunca vio el item, o si lo vio pero el filtro de frescura
+  // lo silencio. Valor: lista de IDs separados por coma, ej:
+  // DEBUG_CHECK_IDS=133413884007271,73754607126064
+  if (process.env.DEBUG_CHECK_IDS) {
+    const ids = process.env.DEBUG_CHECK_IDS.split(",").map((s) => s.trim()).filter(Boolean);
+    const state = await loadState();
+    console.log(`--- DEBUG_CHECK_IDS: chequeando ${ids.length} id(s) contra state.known ---`);
+    for (const id of ids) {
+      const entry = state.known[id];
+      if (entry) {
+        console.log(`  ${id}: SI esta en known -> ${JSON.stringify(entry)}`);
+      } else {
+        console.log(`  ${id}: NO esta en known (el bot nunca lo proceso)`);
+      }
+    }
+    console.log("--- fin DEBUG_CHECK_IDS, no se modifico ningun estado ---");
+    return;
+  }
+
   // RUN_ONCE=true: corre un solo ciclo y termina (modo para GitHub Actions
   // cron u otro scheduler externo, en vez de mantener un proceso 24/7).
   if (process.env.RUN_ONCE === "true") {
