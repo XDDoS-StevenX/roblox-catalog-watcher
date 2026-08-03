@@ -642,7 +642,7 @@ async function tick() {
   // tengan anios. Se filtran por itemCreatedUtc real antes de notificar: si
   // el item es viejo, se guarda igual como conocido (para no reprocesarlo
   // cada ciclo) pero SIN disparar notificacion a Discord/juego.
-  const ITEM_FRESHNESS_THRESHOLD_MS = 48 * 60 * 60 * 1000; // 48 horas
+  const ITEM_FRESHNESS_THRESHOLD_MS = 5 * 24 * 60 * 60 * 1000; // 5 dias
   const allNewItems = current.filter((i) => !state.known[i.id]);
   const newItems = [];
 
