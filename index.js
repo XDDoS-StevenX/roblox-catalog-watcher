@@ -48,6 +48,14 @@ const {
   // -> "REST API" (URL y token, no el endpoint de Redis normal).
   UPSTASH_REDIS_REST_URL,
   UPSTASH_REDIS_REST_TOKEN,
+  // Integracion Rolimons (opcional). Si no estan definidas las 3, esta
+  // fuente extra simplemente se salta sin romper nada (mismo criterio que
+  // CATALOG_QUERY_BUNDLES). Requiere un bot de Discord propio (no un
+  // webhook -- los webhooks solo pueden postear, no leer mensajes) con
+  // permiso "View Channel" + "Read Message History" en los 2 canales.
+  DISCORD_BOT_TOKEN,
+  ROLIMONS_CHANNEL_ID, // canal de "New Item" de Rolimons
+  ROLIMONS_LIMITED_CHANNEL_ID, // canal de "New Limited" de Rolimons
 } = process.env;
 
 const STATE_KEY = "roblox-catalog-watcher:state";
@@ -479,6 +487,168 @@ async function checkStillForSale(items) {
   return result;
 }
 
+// ---------- Integracion Rolimons (opcional) ----------
+// Rolimons corre su propio bot en Discord que detecta items nuevos y
+// Limiteds, tipicamente antes que nosotros (no depende del mismo indice de
+// busqueda por categoria que usa catalog.roproxy.com, que tiene el retraso
+// de cache de Roblox ya documentado). Un webhook no puede LEER mensajes,
+// asi que esto necesita un bot propio (token distinto al webhook) con
+// permiso de ver esos 2 canales.
+const ROLIMONS_ENABLED = Boolean(DISCORD_BOT_TOKEN && (ROLIMONS_CHANNEL_ID || ROLIMONS_LIMITED_CHANNEL_ID));
+let loggedSampleRolimonsHydration = false; // igual que loggedSampleDetailsItem: verificar una vez que los campos vengan como se espera
+
+// Roblox pone el ID numerico real del item en la URL del catalogo. Los
+// campos "Collectible Item ID"/"Collectible Product ID" que a veces trae el
+// embed de Rolimons son UUIDs internos (con guiones y letras) del sistema
+// de Limiteds, NO el ID de catalogo -- este regex los ignora solos porque
+// busca solo digitos.
+const ROLIMONS_ID_PATTERN = /roblox\.com\/catalog\/(\d+)/i;
+
+function extractItemIdsFromDiscordMessage(message) {
+  const found = new Set();
+  const sources = [message.content || ""];
+  for (const embed of message.embeds || []) {
+    if (embed.title) sources.push(embed.title);
+    if (embed.description) sources.push(embed.description);
+    if (embed.url) sources.push(embed.url);
+    for (const field of embed.fields || []) sources.push(`${field.name} ${field.value}`);
+  }
+  for (const text of sources) {
+    const m = text.match(ROLIMONS_ID_PATTERN);
+    if (m) found.add(m[1]);
+  }
+  return [...found];
+}
+
+// Cursor de "ultimo mensaje visto" guardado DENTRO del mismo objeto state
+// (se persiste junto con todo lo demas en el saveState(state) de siempre,
+// no hace falta un cliente Redis aparte).
+async function pollDiscordChannel(state, channelId, cursorField) {
+  if (!DISCORD_BOT_TOKEN || !channelId) return [];
+
+  const url = new URL(`https://discord.com/api/v10/channels/${channelId}/messages`);
+  url.searchParams.set("limit", "50");
+  if (state[cursorField]) url.searchParams.set("after", state[cursorField]);
+
+  let res;
+  try {
+    res = await fetch(url, { headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` } });
+  } catch (err) {
+    console.error(`[Rolimons] Error de red consultando canal ${channelId}:`, err.message);
+    return [];
+  }
+  if (!res.ok) {
+    console.error(`[Rolimons] Discord API fallo (canal ${channelId}): ${res.status} ${await res.text()}`);
+    return [];
+  }
+
+  const messages = await res.json(); // vienen del mas nuevo al mas viejo
+  if (messages.length === 0) return [];
+
+  // Snowflakes de Discord son ordenables como string por tiempo de creacion
+  state[cursorField] = messages[0].id;
+
+  const allIds = new Set();
+  for (const msg of messages) {
+    for (const id of extractItemIdsFromDiscordMessage(msg)) allIds.add(id);
+  }
+  console.log(`[Rolimons] Canal ${channelId}: ${messages.length} mensaje(s) nuevo(s), ${allIds.size} item ID(s) extraidos.`);
+  return [...allIds];
+}
+
+// Pide los detalles completos de items sueltos por ID (no vienen de una
+// busqueda por categoria, asi que no tenemos su fila de fetchCurrentItems
+// todavia). Reusa el mismo endpoint/CSRF que checkStillForSale, pero
+// extrae TODOS los campos que necesita el pipeline normal de "item nuevo"
+// (name, price, isLimited, assetType, etc.), no solo forSale/deadline/units
+// como hace checkStillForSale.
+async function fetchItemFullDetails(ids) {
+  if (ids.length === 0) return [];
+  // itemType real desconocido de antemano (Rolimons no lo manda en un campo
+  // separado, solo en el titulo). "Asset" cubre el caso mas comun
+  // (accesorios); si algun dia Rolimons postea un Bundle en estos canales,
+  // esa fila puntual puede volver con datos vacios -- se veria en el log de
+  // muestra de abajo si pasa.
+  const chunk = ids.map((id) => ({ id: Number(id), itemType: "Asset" }));
+
+  let res = await postDetailsChunk(chunk, cachedCsrfToken);
+  let attempts = 0;
+  while (res.status === 403 && attempts < 3) {
+    attempts += 1;
+    const freshToken = res.headers.get("x-csrf-token");
+    if (!freshToken) break;
+    cachedCsrfToken = freshToken;
+    await sleep(300 * attempts);
+    res = await postDetailsChunk(chunk, cachedCsrfToken);
+  }
+  if (!res.ok) {
+    console.error(`[Rolimons] fetchItemFullDetails fallo: ${res.status} ${await res.text().catch(() => "")}`);
+    return [];
+  }
+
+  const data = await res.json();
+  const rawItems = data.data ?? [];
+  if (!loggedSampleRolimonsHydration && rawItems.length > 0) {
+    loggedSampleRolimonsHydration = true;
+    console.log("[Rolimons] Muestra cruda de un item hidratado (verificar campos):", JSON.stringify(rawItems[0]));
+  }
+
+  // Mismo mapeo de campos que fetchCurrentItems, aplicado a este endpoint
+  // en vez de al de busqueda -- si algun nombre de campo difiere entre los
+  // 2 endpoints, va a saltar a la vista en el log de muestra de arriba.
+  return rawItems.map((it) => {
+    let forSale;
+    if (typeof it.priceStatus === "string") forSale = !/off\s*sale/i.test(it.priceStatus);
+    else if (typeof it.isForSale === "boolean") forSale = it.isForSale;
+    else if (typeof it.purchasable === "boolean") forSale = it.purchasable;
+    else if (typeof it.isPurchasable === "boolean") forSale = it.isPurchasable;
+    else if (typeof it.price === "number") forSale = "inferred";
+    else forSale = undefined;
+
+    const assetTypeId = typeof it.assetType === "number" ? it.assetType : null;
+    const { name: assetTypeName, bodySlot } = getAssetTypeInfo(assetTypeId);
+
+    return {
+      id: it.id,
+      name: it.name,
+      description: it.description ?? "",
+      price: it.price ?? null,
+      itemType: it.itemType ?? "Asset",
+      assetTypeId,
+      assetTypeName,
+      bodySlot,
+      forSale,
+      taxonomyTags: [],
+      createdUtc: it.itemCreatedUtc ?? null,
+      isLimited: Array.isArray(it.itemRestrictions)
+        ? it.itemRestrictions.some((r) => /limited/i.test(r))
+        : false,
+      isLimitedUnique: Array.isArray(it.itemRestrictions)
+        ? it.itemRestrictions.some((r) => /limitedunique/i.test(r))
+        : false,
+      itemStatus: Array.isArray(it.itemStatus) ? it.itemStatus : [],
+      favoriteCount: typeof it.favoriteCount === "number" ? it.favoriteCount : null,
+      offSaleDeadline: it.offSaleDeadline ?? null,
+      unitsAvailableForConsumption:
+        typeof it.unitsAvailableForConsumption === "number" ? it.unitsAvailableForConsumption : null,
+    };
+  });
+}
+
+// Candidatos del canal de "New Item": ids que Rolimons ya vio y todavia no
+// estan en el catalogo de esta corrida (current) ni en state.known. Se
+// hidratan y devuelven en el MISMO formato que fetchCurrentItems, para que
+// tick() los pueda concatenar a "current" y listo -- pasan por exactamente
+// el mismo camino de siempre (filtro de frescura, embed, notify, state.known).
+async function fetchRolimonsNewItemRows(state, alreadyPresentIds) {
+  if (!ROLIMONS_ENABLED || !ROLIMONS_CHANNEL_ID) return [];
+  const seenIds = await pollDiscordChannel(state, ROLIMONS_CHANNEL_ID, "rolimonsNewCursor");
+  const toHydrate = seenIds.filter((id) => !state.known[id] && !alreadyPresentIds.has(id));
+  if (toHydrate.length === 0) return [];
+  console.log(`[Rolimons] ${toHydrate.length} candidato(s) nuevo(s) de Rolimons a hidratar:`, toHydrate.join(", "));
+  return fetchItemFullDetails(toHydrate);
+}
+
 // ---------- Notificaciones ----------
 function robloxThumbnailUrl(assetId) {
   return `https://www.roblox.com/asset-thumbnail/image?assetId=${assetId}&width=150&height=150&format=png`;
@@ -604,6 +774,21 @@ async function tick() {
   } catch (err) {
     console.error("Error consultando catalogo:", err.message);
     return;
+  }
+
+  // Rolimons (opcional): candidatos que ese bot ya vio y nuestra propia
+  // busqueda por categoria todavia no alcanzo. Se agregan a "current" ANTES
+  // de calcular currentIds, asi entran a exactamente el mismo pipeline que
+  // el resto (filtro de frescura, embed "New Item", notifyRobloxWithRetry,
+  // state.known) sin ningun camino especial.
+  if (ROLIMONS_ENABLED) {
+    try {
+      const alreadyPresentIds = new Set(current.map((i) => String(i.id)));
+      const rolimonsRows = await fetchRolimonsNewItemRows(state, alreadyPresentIds);
+      current = current.concat(rolimonsRows);
+    } catch (err) {
+      console.error("[Rolimons] Error en fetchRolimonsNewItemRows:", err.message);
+    }
   }
 
   const currentIds = new Set(current.map((i) => String(i.id)));
@@ -777,6 +962,62 @@ async function tick() {
       originalUnits: item.unitsAvailableForConsumption ?? null,
       isHighValue,
     };
+  }
+
+  // 1.5) Rolimons "New Limited": items que se volvieron Limited. Dos casos:
+  //   a) Ya estaba en state.known (lo veniamos vendiendo como compra
+  //      directa) -> avisar YA con isLimited=true explicito, sin esperar
+  //      la revalidacion periodica de 5 min de mas abajo. El payload
+  //      ITEM_RELISTED normal (bloque 2.5) NUNCA trae isLimited -- este es
+  //      justo el caso que lo completa.
+  //   b) Recien se agrego a state.known EN ESTE MISMO tick (bloque 1 de
+  //      arriba, si tambien lo posteo el canal de "New Item") -> si ya
+  //      quedo con isLimited=true real (desde itemRestrictions), no hay
+  //      nada que hacer aca, se salta solo (evita el evento duplicado).
+  //   c) No esta en state.known en absoluto todavia -> no se procesa aca;
+  //      si es genuinamente nuevo deberia aparecer tambien en el canal de
+  //      "New Item" de Rolimons y entrar por el bloque 1 normal.
+  if (ROLIMONS_ENABLED && ROLIMONS_LIMITED_CHANNEL_ID) {
+    try {
+      const limitedIds = await pollDiscordChannel(state, ROLIMONS_LIMITED_CHANNEL_ID, "rolimonsLimitedCursor");
+      for (const idStr of limitedIds) {
+        const known = state.known[idStr];
+        if (!known || known.isLimited === true) continue; // caso b/c de arriba
+
+        console.log(`[Rolimons] ${known.name} (${idStr}) se volvio Limited -- avisando ya, sin esperar la revalidacion periodica.`);
+        known.isLimited = true;
+
+        const thumbnailUrl = (await fetchThumbnailUrl(idStr, known.itemType)) || robloxThumbnailUrl(idStr);
+        pushEmbed(known.itemType, {
+          title: `🔒 Became Limited (via Rolimons) - ${known.name}`,
+          url: robloxItemUrl(idStr),
+          color: 0x9b59b6,
+          thumbnail: { url: thumbnailUrl },
+          timestamp: new Date().toISOString(),
+          fields: [
+            { name: "🆔 ID", value: String(idStr), inline: true },
+            { name: "📦 Type", value: known.assetTypeName ?? known.itemType, inline: true },
+          ],
+        });
+
+        await notifyRobloxWithRetry(state, {
+          type: "ITEM_RELISTED",
+          id: Number(idStr),
+          name: known.name,
+          itemType: known.itemType,
+          assetTypeId: known.assetTypeId,
+          assetTypeName: known.assetTypeName,
+          bodySlot: known.bodySlot,
+          // Explicito: CatalogUpdateListener.fillLimitedFields ya prefiere
+          // este campo sobre el fallback conservador cuando no viene nil,
+          // no hace falta tocar nada del lado de Studio.
+          isLimited: true,
+          isLimitedUnique: known.isLimitedUnique === true,
+        });
+      }
+    } catch (err) {
+      console.error("[Rolimons] Error procesando canal de Limiteds:", err.message);
+    }
   }
 
   // 2) Items que ya conociamos y hay que reconfirmar contra el endpoint de
