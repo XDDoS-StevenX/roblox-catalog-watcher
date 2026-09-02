@@ -858,6 +858,7 @@ async function tick() {
         unitsAvailableForConsumption: item.unitsAvailableForConsumption ?? null,
         originalUnits: item.unitsAvailableForConsumption ?? null,
         isHighValue: false,
+        firstSeenAt: Date.now(),
       };
       continue;
     }
