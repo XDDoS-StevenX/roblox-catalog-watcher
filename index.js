@@ -962,6 +962,7 @@ async function tick() {
       // total real desde el lanzamiento, solo desde que el bot lo detecto.
       originalUnits: item.unitsAvailableForConsumption ?? null,
       isHighValue,
+      firstSeenAt: Date.now(),
     };
   }
 
