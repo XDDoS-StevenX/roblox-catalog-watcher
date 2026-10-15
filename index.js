@@ -1,278 +1,1447 @@
---- /tmp/index.orig.js	2026-10-15 02:02:19.406377337 +0000
-+++ index.js	2026-10-15 02:02:19.464221901 +0000
-@@ -695,24 +695,49 @@
-   };
- }
- 
-+// Devuelve los embeds que NO se pudieron entregar (para reintentarlos en la
-+// proxima corrida en vez de perderlos). Antes solo se atrapaban errores de red
-+// y un 400/429/5xx de Discord se perdia en silencio.
- async function sendDigest(embeds) {
--  if (embeds.length === 0) return;
-+  if (embeds.length === 0) return [];
-   const chunks = [];
-   for (let i = 0; i < embeds.length; i += 10) chunks.push(embeds.slice(i, i + 10));
- 
-+  const failed = [];
-   for (let i = 0; i < chunks.length; i++) {
-     const mention = i === 0 && Boolean(DISCORD_ROLE_ID);
--    await fetch(DISCORD_WEBHOOK_URL, {
--      method: "POST",
--      headers: { "Content-Type": "application/json" },
--      body: JSON.stringify({
--        content: i === 0 ? (mention ? `<@&${DISCORD_ROLE_ID}>` : undefined) : undefined,
--        allowed_mentions: mention ? { roles: [DISCORD_ROLE_ID] } : { parse: [] },
--        embeds: chunks[i],
--      }),
--    }).catch((err) => console.error("Error notificando a Discord:", err));
-+    let delivered = false;
-+    for (let attempt = 1; attempt <= 3 && !delivered; attempt++) {
-+      try {
-+        const res = await fetch(DISCORD_WEBHOOK_URL, {
-+          method: "POST",
-+          headers: { "Content-Type": "application/json" },
-+          body: JSON.stringify({
-+            content: i === 0 ? (mention ? `<@&${DISCORD_ROLE_ID}>` : undefined) : undefined,
-+            allowed_mentions: mention ? { roles: [DISCORD_ROLE_ID] } : { parse: [] },
-+            embeds: chunks[i],
-+          }),
-+        });
-+        if (res.ok) {
-+          delivered = true;
-+        } else if (res.status === 429) {
-+          const body = await res.json().catch(() => ({}));
-+          const waitMs = Math.min(15000, Math.ceil((body.retry_after ?? 2) * 1000) + 200);
-+          console.error(`Discord 429 (rate limit), esperando ${waitMs}ms (intento ${attempt}/3)`);
-+          await sleep(waitMs);
-+        } else {
-+          console.error(`Discord rechazo el digest: ${res.status} ${await res.text().catch(() => "")}`);
-+          break; // 4xx/5xx que no es rate limit: no tiene sentido reintentar en el acto
-+        }
-+      } catch (err) {
-+        console.error("Error notificando a Discord:", err);
-+        await sleep(1000);
-+      }
-+    }
-+    if (!delivered) failed.push(...chunks[i]);
-     if (i < chunks.length - 1) await sleep(1200); // margen para el rate limit de webhooks
-   }
-+  return failed;
- }
- 
- async function notifyRoblox(payload) {
-@@ -749,9 +774,27 @@
- }
- 
- // ---------- Ciclo principal ----------
-+// Estado de la corrida actual, para poder guardarlo si GitHub Actions cancela o
-+// corta el job (SIGTERM) antes de llegar al saveState final.
-+let currentState = null;
-+let shuttingDown = false;
-+process.on("SIGTERM", async () => {
-+  if (shuttingDown) return;
-+  shuttingDown = true;
-+  console.error("SIGTERM recibido (cancelacion/timeout del job): guardando estado antes de salir...");
-+  try {
-+    if (currentState) await saveState(currentState);
-+  } catch (err) {
-+    console.error("No se pudo guardar el estado en SIGTERM:", err);
-+  }
-+  process.exit(143);
-+});
-+
- async function tick() {
-   const state = await loadState();
-+  currentState = state;
-   state.pendingGameSync ??= []; // compatibilidad con state.json de corridas viejas
-+  state.pendingDigest ??= []; // avisos de Discord pendientes (ver pushEmbed)
- 
-   // Reintentar primero los mensajes que no pudieron publicarse en la corrida
-   // anterior (ej. por "publish limit exceeded"), antes de generar mensajes
-@@ -813,10 +856,15 @@
-   // Embeds construidos esta corrida, agrupados por itemType para el digest
-   // final ("Item Update"). No se manda nada a Discord hasta el final del
-   // tick; el juego (notifyRoblox) si recibe cada evento en tiempo real.
--  const digestGroups = {}; // { Bundle: [embed, ...], Asset: [embed, ...] }
-+  // OJO (Octubre 2026): los embeds viven en state.pendingDigest (se guarda con
-+  // el resto del estado). Asi un item marcado como "known" y su aviso de Discord
-+  // se persisten JUNTOS: si la corrida se corta (timeout / cancelacion de
-+  // GitHub Actions) el aviso pendiente se manda en la siguiente corrida, y si
-+  // el estado no llega a guardarse el item vuelve a detectarse (nunca quedan
-+  // "avisos repetidos" por un estado sin guardar ni avisos perdidos).
-+  state.pendingDigest ??= [];
-   const pushEmbed = (itemType, embed) => {
--    const key = itemType || "Asset";
--    (digestGroups[key] ??= []).push(embed);
-+    state.pendingDigest.push({ t: itemType || "Asset", embed });
-   };
- 
-   // 1) Items nuevos (aparecen ahora, no estaban en el estado).
-@@ -834,11 +882,17 @@
-   for (const item of allNewItems) {
-     const createdAt = item.createdUtc ? new Date(item.createdUtc).getTime() : null;
-     const ageMs = createdAt != null && !Number.isNaN(createdAt) ? Date.now() - createdAt : null;
--    const isStale = ageMs != null && ageMs > ITEM_FRESHNESS_THRESHOLD_MS;
-+    // Bug reportado (Octubre 2026): Roblox crea muchos items VARIOS DIAS (o semanas)
-+    // antes de ponerlos a la venta, asi que itemCreatedUtc solo no sirve para
-+    // saber si algo "salio nuevo": un lanzamiento real se descartaba en silencio
-+    // como "antiguo". La etiqueta "New" que pone Roblox (itemStatus) si indica
-+    // lanzamiento reciente, asi que un item con esa etiqueta NUNCA se descarta.
-+    const hasNewTag = (item.itemStatus ?? []).some((s) => /new/i.test(s));
-+    const isStale = ageMs != null && ageMs > ITEM_FRESHNESS_THRESHOLD_MS && !hasNewTag;
- 
-     if (isStale) {
-       console.log(
--        `Item antiguo detectado por primera vez (creado ${item.createdUtc}), se agrega como conocido sin notificar: ${item.name} (${item.id})`
-+        `Item antiguo detectado por primera vez (creado ${item.createdUtc}, forSale=${item.forSale}, price=${item.price}, status=[${(item.itemStatus ?? []).join(",")}]), se agrega como conocido sin notificar: ${item.name} (${item.id})`
-       );
-       // Se guarda como conocido "silenciosamente" para que no se re-evalue
-       // en cada tick, pero saltando todo el bloque de abajo (pushEmbed,
-@@ -859,13 +913,20 @@
-         originalUnits: item.unitsAvailableForConsumption ?? null,
-         isHighValue: false,
-         firstSeenAt: Date.now(),
-+        skippedAsOld: true, // visible en DEBUG_CHECK_IDS: lo vio pero lo silencio el filtro de frescura
-       };
-       continue;
-     }
-     newItems.push(item);
-   }
- 
-+  let processedNew = 0;
-   for (const item of newItems) {
-+    // Checkpoint: si hay muchos items nuevos de golpe (cada uno tarda ~1-3 s por la
-+    // pausa de MessagingService + miniatura), guardar de a ratos evita que un corte
-+    // a mitad de corrida lo repita todo en la siguiente.
-+    if (processedNew > 0 && processedNew % 10 === 0) await saveState(state);
-+    processedNew += 1;
-     console.log(`New item detected: ${item.name} (${item.id})`);
-     const saleLabel =
-       item.forSale === true
-@@ -1057,8 +1118,20 @@
-     );
-     for (const id of missingIds) {
-       const stillForSale = status[id]?.purchasable;
-+      if (stillForSale === true) {
-+        delete state.known[id].removeStrikes;
-+      }
-       if (stillForSale === false) {
-         const item = state.known[id];
-+        // Histeresis (Octubre 2026): una sola respuesta "no comprable" de roproxy puede ser
-+        // un falso positivo y generaba ciclos "Removed -> Relisted" repetidos en Discord. Se
-+        // exige que se confirme en 2 revalidaciones seguidas antes de avisar.
-+        item.removeStrikes = (item.removeStrikes ?? 0) + 1;
-+        if (item.removeStrikes < 2) {
-+          console.log(`Posible salida de venta (1/2, se confirma en la proxima revalidacion): ${item.name} (${id})`);
-+          continue;
-+        }
-+        delete item.removeStrikes;
-         console.log(`Item removed from sale: ${item.name} (${id})`);
-         const thumbnailUrl = (await fetchThumbnailUrl(id, item.itemType)) || robloxThumbnailUrl(id);
-         const typeLabel = item.assetTypeName ?? item.itemType;
-@@ -1104,9 +1177,20 @@
-         offSaleIds.map((id) => ({ id: Number(id), itemType: state.known[id].itemType }))
-       );
-       for (const id of offSaleIds) {
-+        if (relistStatus[id]?.purchasable !== true) {
-+          delete state.known[id].relistStrikes;
-+          continue;
-+        }
-         if (relistStatus[id]?.purchasable === true && !notifiedRelistedThisProcess.has(id)) {
--          notifiedRelistedThisProcess.add(id);
-           const item = state.known[id];
-+          // Misma histeresis que en la salida de venta: 2 confirmaciones seguidas.
-+          item.relistStrikes = (item.relistStrikes ?? 0) + 1;
-+          if (item.relistStrikes < 2) {
-+            console.log(`Posible relist (1/2, se confirma en la proxima revalidacion): ${item.name} (${id})`);
-+            continue;
-+          }
-+          delete item.relistStrikes;
-+          notifiedRelistedThisProcess.add(id);
-           console.log(`Item relisted (vuelve a la venta): ${item.name} (${id})`);
-           const thumbnailUrl = (await fetchThumbnailUrl(id, item.itemType)) || robloxThumbnailUrl(id);
-           const typeLabel = item.assetTypeName ?? item.itemType;
-@@ -1156,6 +1240,16 @@
- 
-     if (!deadlineChanged && !qtyChanged) continue;
- 
-+    // Throttle (Octubre 2026): en un Limited con cupo, el stock baja con CADA venta y
-+    // se mandaba un aviso (Discord + juego) en cada corrida. Ahora un cambio de solo
-+    // cantidad avisa como mucho una vez cada 30 min (salvo agotado o cambio de fecha
-+    // limite, que avisan al instante). prev no se actualiza al saltarse, asi el
-+    // cambio se reporta apenas se abre la ventana.
-+    const LIMIT_UPDATE_MIN_GAP_MS = 30 * 60 * 1000;
-+    if (!deadlineChanged && !soldOut && prev.lastLimitNotifyAt && Date.now() - prev.lastLimitNotifyAt < LIMIT_UPDATE_MIN_GAP_MS) {
-+      continue;
-+    }
-+
-     const unitsSold =
-       item.isLimitedUnique && prev.originalUnits != null && item.unitsAvailableForConsumption != null
-         ? Math.max(0, prev.originalUnits - item.unitsAvailableForConsumption)
-@@ -1194,10 +1288,20 @@
- 
-     state.known[item.id].offSaleDeadline = item.offSaleDeadline ?? null;
-     state.known[item.id].unitsAvailableForConsumption = item.unitsAvailableForConsumption ?? null;
-+    state.known[item.id].lastLimitNotifyAt = Date.now();
-   }
- 
-   // Armar y mandar el digest agrupado: Bundles primero, luego el resto.
-+  // Incluye lo que quedo pendiente de corridas anteriores (state.pendingDigest).
-+  // Orden: 1) se guarda el estado CON los avisos pendientes, 2) se envian, 3) se
-+  // guarda lo que haya fallado. Antes se enviaba primero y se guardaba al final:
-+  // si el job se cortaba o Upstash fallaba entre medias, la siguiente corrida
-+  // volvia a detectar los mismos items y repetia los avisos de Discord.
-+  await saveState(state);
-+
-   const typeOrder = ["Bundle", "Asset"];
-+  const digestGroups = {};
-+  for (const { t, embed } of state.pendingDigest) (digestGroups[t] ??= []).push(embed);
-   const sortedTypes = Object.keys(digestGroups).sort(
-     (a, b) => typeOrder.indexOf(a) - typeOrder.indexOf(b)
-   );
-@@ -1207,9 +1311,18 @@
-     digestEmbeds.push(sectionHeaderEmbed(label, digestGroups[t].length));
-     digestEmbeds.push(...digestGroups[t]);
-   }
--  await sendDigest(digestEmbeds);
- 
--  await saveState(state);
-+  if (digestEmbeds.length > 0) {
-+    const failed = await sendDigest(digestEmbeds);
-+    // Los embeds fallidos se vuelven a guardar como pendientes (sin los encabezados de
-+    // seccion, que se regeneran). Tope de 60 para que un Discord caido no infle el estado.
-+    const failedSet = new Set(failed);
-+    state.pendingDigest = state.pendingDigest.filter((e) => failedSet.has(e.embed)).slice(-60);
-+    if (state.pendingDigest.length > 0) {
-+      console.error(`${state.pendingDigest.length} aviso(s) de Discord quedan pendientes para la proxima corrida`);
-+    }
-+    await saveState(state);
-+  }
- }
- 
- // ---------- Estado del loop (para el endpoint de status/health-check) ----------
-@@ -1286,9 +1399,25 @@
-       const entry = state.known[id];
-       if (entry) {
-         console.log(`  ${id}: SI esta en known -> ${JSON.stringify(entry)}`);
-+        if (entry.skippedAsOld) console.log(`    ^ OJO: lo vio pero el filtro de frescura lo silencio (sin aviso).`);
-       } else {
-         console.log(`  ${id}: NO esta en known (el bot nunca lo proceso)`);
-       }
-+      // Datos en vivo del item, para ver por que se habria saltado (creador, fecha, estado)
-+      try {
-+        const live = await fetchItemFullDetails([id]);
-+        if (live.length === 0) {
-+          console.log(`    en vivo: la API de detalles no devolvio datos para ${id}`);
-+        } else {
-+          const it = live[0];
-+          const ageDays = it.createdUtc ? ((Date.now() - new Date(it.createdUtc).getTime()) / 86400000).toFixed(1) : "?";
-+          console.log(
-+            `    en vivo: name="${it.name}" type=${it.itemType} forSale=${it.forSale} price=${it.price} creado=${it.createdUtc} (${ageDays} dias) status=[${it.itemStatus.join(",")}] limited=${it.isLimited}`
-+          );
-+        }
-+      } catch (err) {
-+        console.log(`    en vivo: error consultando detalles: ${err.message}`);
-+      }
-     }
-     console.log("--- fin DEBUG_CHECK_IDS, no se modifico ningun estado ---");
-     return;
+import "dotenv/config";
+import fs from "node:fs/promises";
+import path from "node:path";
+import http from "node:http";
+
+const {
+  ROBLOX_API_KEY,
+  UNIVERSE_ID,
+  MESSAGING_TOPIC = "ItemCatalogUpdate",
+  DISCORD_WEBHOOK_URL,
+  // Opcional. ID del rol de Discord a mencionar en cada notificacion (clic
+  // derecho en el rol con "Modo desarrollador" activado -> Copiar ID). Si
+  // no se define, los mensajes salen sin mencion, igual que antes.
+  DISCORD_ROLE_ID,
+  // Legacy: query unico (accesorios). Se sigue soportando si no defines los
+  // nuevos CATALOG_QUERY_ACCESSORIES / CATALOG_QUERY_BUNDLES, para no romper
+  // el secret que ya tenias guardado.
+  CATALOG_QUERY,
+  // Nuevos: queries separados por categoria. Se fusionan en cada tick sin
+  // duplicar items (por id). Si CATALOG_QUERY_ACCESSORIES no esta definido,
+  // se usa CATALOG_QUERY como fallback para esa categoria.
+  CATALOG_QUERY_ACCESSORIES,
+  CATALOG_QUERY_BUNDLES,
+  // Opcional (julio 2026). Query nueva contra el endpoint v2 del catalogo
+  // (descubierto capturando la request real de la pagina web con
+  // DevTools). Corre en paralelo a las de v1 de arriba -- ver comentario
+  // junto a SEARCH_URL_V2 mas abajo para el contexto completo. Formato
+  // de ejemplo (parametros v2, distintos a los de v1):
+  // "taxonomy=XXXXXXXXXX&creatorName=Roblox&salesTypeFilter=1&sortType=3&includeNotForSale=true&limit=120"
+  CATALOG_QUERY_V2_BROAD,
+  // Opcional (julio 2026). Igual que CATALOG_QUERY_V2_BROAD pero con la
+  // taxonomy especifica de Bundles ("Characters", id kfHzJwaNYM8s2CWRqYUhRa)
+  // -- confirmado con DevTools que bundles usa una taxonomy DISTINTA a la
+  // de accesorios/backgrounds, asi que no hay un query v2 "universal" que
+  // cubra todas las categorias con un solo taxonomy id; hace falta una
+  // query v2 por categoria, igual que en v1.
+  CATALOG_QUERY_BUNDLES_V2,
+  POLL_INTERVAL_MS = "45000",
+  MAX_PAGES = "3",
+  // Precio (R$) desde el cual un item se marca como "alto valor" para el
+  // panel de items destacados en el juego. Se manda al game via el campo
+  // "isHighValue" en cada payload de MessagingService.
+  FEATURED_MIN_PRICE = "1000",
+  // Opcional. Si se definen ambas, el estado se guarda en Upstash Redis
+  // (capa gratuita, sin tarjeta) en vez de en el archivo local — asi
+  // sobrevive a redeploys/restarts de Render, que tienen filesystem
+  // efimero. Se consiguen en https://console.upstash.com -> tu database
+  // -> "REST API" (URL y token, no el endpoint de Redis normal).
+  UPSTASH_REDIS_REST_URL,
+  UPSTASH_REDIS_REST_TOKEN,
+  // Integracion Rolimons (opcional). Si no estan definidas las 3, esta
+  // fuente extra simplemente se salta sin romper nada (mismo criterio que
+  // CATALOG_QUERY_BUNDLES). Requiere un bot de Discord propio (no un
+  // webhook -- los webhooks solo pueden postear, no leer mensajes) con
+  // permiso "View Channel" + "Read Message History" en los 2 canales.
+  DISCORD_BOT_TOKEN,
+  ROLIMONS_CHANNEL_ID, // canal de "New Item" de Rolimons
+  ROLIMONS_LIMITED_CHANNEL_ID, // canal de "New Limited" de Rolimons
+} = process.env;
+
+const STATE_KEY = "roblox-catalog-watcher:state";
+const USE_UPSTASH = Boolean(UPSTASH_REDIS_REST_URL && UPSTASH_REDIS_REST_TOKEN);
+
+// Lista de queries a correr esta corrida, cada uno con una etiqueta para
+// los logs. Se descartan los que no tengan valor (ej. si no configuraste
+// CATALOG_QUERY_BUNDLES todavia, simplemente no se corre esa categoria).
+const CATALOG_QUERIES = [
+  { label: "accessories", query: CATALOG_QUERY_ACCESSORIES || CATALOG_QUERY, apiVersion: "v1" },
+  { label: "bundles", query: CATALOG_QUERY_BUNDLES, apiVersion: "v1" },
+  // Query nueva (opcional) contra el endpoint v2 descubierto en julio 2026.
+  // Corre EN PARALELO a las de v1 de arriba, no las reemplaza. Pensada
+  // para agarrar tipos de item nuevos que v1 todavia no indexa bien (ej.
+  // "Background"). Si CATALOG_QUERY_V2_BROAD no esta configurado, se
+  // salta sin romper nada (mismo patron que CATALOG_QUERY_BUNDLES).
+  { label: "v2-broad", query: CATALOG_QUERY_V2_BROAD, apiVersion: "v2" },
+  // Bundles vía v2 (julio 2026) -- misma logica que v2-broad pero con
+  // taxonomy de Bundles/Characters. Corre en paralelo a "bundles" (v1) de
+  // arriba, no lo reemplaza -- mismo criterio conservador usado con
+  // v2-broad.
+  { label: "bundles-v2", query: CATALOG_QUERY_BUNDLES_V2, apiVersion: "v2" },
+].filter((q) => q.query);
+
+for (const [key, val] of Object.entries({
+  ROBLOX_API_KEY,
+  UNIVERSE_ID,
+  DISCORD_WEBHOOK_URL,
+})) {
+  if (!val) {
+    console.error(`Falta la variable de entorno ${key}. Revisa tu .env`);
+    process.exit(1);
+  }
+}
+
+if (CATALOG_QUERIES.length === 0) {
+  console.error(
+    "Falta definir al menos un query de catalogo: CATALOG_QUERY_ACCESSORIES, CATALOG_QUERY_BUNDLES, o el legacy CATALOG_QUERY."
+  );
+  process.exit(1);
+}
+
+const STATE_FILE = path.resolve("./state.json");
+// Se usa roproxy.com en vez de catalog.roblox.com porque Roblox bloquea
+// las IPs compartidas de GitHub Actions. roproxy es un espejo comunitario
+// muy usado por desarrolladores de Roblox para este mismo problema.
+const SEARCH_URL = "https://catalog.roproxy.com/v1/search/items/details";
+// v2 (julio 2026): descubierto capturando con DevTools la request real que
+// hace la pagina web del catalogo (Category/CreatorTargetId/SortType de v1
+// se reemplazan por taxonomy/creatorName/salesTypeFilter/sortType en v2).
+// Se agrega COMO QUERY ADICIONAL, en paralelo a las de v1 que ya
+// funcionaban bien -- no se reemplaza nada, para no arriesgar perder
+// cobertura de lo que ya detectaba bien. v2 permite Limit hasta 120 (vs
+// el maximo de 30 de v1), y su indice parece incluir tipos de item mas
+// nuevos (ej. taxonomia "Background") que el buscador v1 no encontraba
+// -- confirmado con un caso real: item id 101873719747781, tipo
+// "Background", visible en la busqueda de la pagina web (v2) pero
+// ausente en v1 incluso consultando directo a catalog.roblox.com sin
+// proxy de por medio.
+const SEARCH_URL_V2 = "https://catalog.roproxy.com/v2/search/items/details";
+const DETAILS_URL = "https://catalog.roproxy.com/v1/catalog/items/details";
+// Roblox exige un token CSRF (header x-csrf-token) incluso para este
+// endpoint de solo lectura. El primer POST sin token (o con uno vencido)
+// responde 403 "XSRF token invalid" pero trae el token valido en el header
+// de la MISMA respuesta 403 — hay que reintentar una vez con ese token.
+// Se cachea en memoria porque el token es valido por un buen rato (no hay
+// que pedirlo en cada corrida).
+let cachedCsrfToken = null;
+// Se loguea una sola vez, al primer chequeo exitoso, el objeto crudo de un
+// item para confirmar en logs que priceStatus (u otro campo) realmente
+// viene como se espera. Verificacion extra, no afecta la logica.
+let loggedSampleDetailsItem = false;
+// Mitigacion inmediata anti-spam: aunque el guardado de estado fallara o se
+// retrasara, esto evita re-notificar el mismo "relisted" en cada tick dentro
+// de la vida de este proceso (se resetea si el proceso se reinicia, pero es
+// mejor que repetir cada 15s indefinidamente).
+const notifiedRelistedThisProcess = new Set();
+const MESSAGING_URL = (universeId, topic) =>
+  `https://apis.roblox.com/messaging-service/v1/universes/${universeId}/topics/${topic}`;
+
+// Mapa de assetType (numerico, campo "assetType" que trae la API de
+// catalogo) a nombre legible + parte del avatar donde se coloca. Cubre los
+// tipos de accesorio mas comunes en el catalogo oficial de Roblox. Si un
+// item trae un assetType que no esta en esta lista, se usa un fallback
+// generico (ver getAssetTypeInfo) en vez de romper.
+const ASSET_TYPE_INFO = {
+  8: { name: "Hat", bodySlot: "Head" },
+  17: { name: "Head", bodySlot: "Head (body part)" },
+  18: { name: "Face", bodySlot: "Head (body part)" },
+  19: { name: "Gear", bodySlot: "Held / Tool" },
+  41: { name: "Hair Accessory", bodySlot: "Head" },
+  42: { name: "Face Accessory", bodySlot: "Face" },
+  43: { name: "Neck Accessory", bodySlot: "Neck" },
+  44: { name: "Shoulder Accessory", bodySlot: "Shoulders" },
+  45: { name: "Front Accessory", bodySlot: "Front Torso" },
+  46: { name: "Back Accessory", bodySlot: "Back" },
+  47: { name: "Waist Accessory", bodySlot: "Waist" },
+  57: { name: "Ear Accessory", bodySlot: "Head (ears)" },
+  58: { name: "Eye Accessory", bodySlot: "Face (eyes)" },
+  64: { name: "T-Shirt Accessory", bodySlot: "Torso" },
+  65: { name: "Shirt Accessory", bodySlot: "Torso" },
+  66: { name: "Pants Accessory", bodySlot: "Legs" },
+  67: { name: "Jacket Accessory", bodySlot: "Torso" },
+  68: { name: "Sweater Accessory", bodySlot: "Torso" },
+  69: { name: "Shorts Accessory", bodySlot: "Legs" },
+  70: { name: "Left Shoe Accessory", bodySlot: "Feet (left)" },
+  71: { name: "Right Shoe Accessory", bodySlot: "Feet (right)" },
+  72: { name: "Dress/Skirt Accessory", bodySlot: "Legs" },
+  76: { name: "Eyebrow Accessory", bodySlot: "Face" },
+};
+
+function getAssetTypeInfo(assetTypeId) {
+  if (assetTypeId == null) return { name: null, bodySlot: null };
+  return ASSET_TYPE_INFO[assetTypeId] ?? { name: `Type ${assetTypeId}`, bodySlot: "Unknown" };
+}
+
+// ---------- Persistencia ----------
+// Si UPSTASH_REDIS_REST_URL/TOKEN estan definidos, el estado vive en Upstash
+// Redis (gratis, sobrevive a redeploys/restarts de Render). Si no, cae al
+// archivo local de siempre (efimero en Render, pero funciona igual en local
+// o en GitHub Actions, donde el propio workflow hace commit de state.json).
+async function upstashGet(key) {
+  const res = await fetch(`${UPSTASH_REDIS_REST_URL}/get/${encodeURIComponent(key)}`, {
+    headers: { Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}` },
+  });
+  if (!res.ok) throw new Error(`Upstash GET fallo: ${res.status}`);
+  const data = await res.json();
+  return data.result ?? null; // string (json) o null si la key no existe
+}
+
+async function upstashSet(key, value) {
+  const res = await fetch(`${UPSTASH_REDIS_REST_URL}/set/${encodeURIComponent(key)}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${UPSTASH_REDIS_REST_TOKEN}`,
+      "Content-Type": "text/plain",
+    },
+    body: value,
+  });
+  if (!res.ok) throw new Error(`Upstash SET fallo: ${res.status}`);
+}
+
+async function loadState() {
+  if (USE_UPSTASH) {
+    try {
+      const raw = await upstashGet(STATE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        console.log(
+          `Estado cargado de Upstash: ${Object.keys(parsed.known ?? {}).length} item(s) conocido(s), lastFullRecheckAt=${parsed.lastFullRecheckAt ?? "nunca"}`
+        );
+        return parsed;
+      }
+      console.log("Estado cargado de Upstash: vacio (key no existe todavia)");
+    } catch (err) {
+      console.error("Error leyendo estado de Upstash, se usa estado vacio:", err);
+    }
+    return { known: {}, pendingGameSync: [] };
+  }
+  try {
+    const raw = await fs.readFile(STATE_FILE, "utf-8");
+    return JSON.parse(raw);
+  } catch {
+    return { known: {}, pendingGameSync: [] }; // known[itemId] = { name, price, forSale: true }
+  }
+}
+
+async function saveState(state) {
+  const json = JSON.stringify(state, null, 2);
+  if (USE_UPSTASH) {
+    try {
+      await upstashSet(STATE_KEY, json);
+      console.log(
+        `Estado guardado en Upstash: ${Object.keys(state.known ?? {}).length} item(s) conocido(s), lastFullRecheckAt=${state.lastFullRecheckAt ?? "nunca"}, ${json.length} bytes`
+      );
+      return;
+    } catch (err) {
+      console.error("Error guardando estado en Upstash (se pierde este ciclo si el proceso reinicia):", err);
+      return;
+    }
+  }
+  await fs.writeFile(STATE_FILE, json);
+}
+
+// ---------- Roblox: descubrir items de la categoria ----------
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchCatalogPage(query, cursor, baseUrl = SEARCH_URL, attempt = 1) {
+  const url = new URL(baseUrl);
+  for (const [k, v] of new URLSearchParams(query)) {
+    url.searchParams.set(k, v);
+  }
+  if (cursor) url.searchParams.set("cursor", cursor);
+
+  const res = await fetch(url, {
+    headers: {
+      // User-Agent tipo navegador normal: algunas APIs bloquean con mas
+      // severidad patrones que se identifican claramente como bot/script.
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      Accept: "application/json",
+    },
+  });
+
+  if (res.status === 429 && attempt < 3) {
+    const retryAfter = Number(res.headers.get("retry-after")) || attempt * 5;
+    console.log(`429 recibido, reintentando en ${retryAfter}s (intento ${attempt}/3)...`);
+    await sleep(retryAfter * 1000);
+    return fetchCatalogPage(query, cursor, baseUrl, attempt + 1);
+  }
+
+  if (!res.ok) {
+    throw new Error(`Catalog search fallo: ${res.status} ${await res.text()}`);
+  }
+  return res.json();
+}
+
+async function fetchCurrentItems() {
+  // Map en vez de array para poder deduplicar por id: si el mismo item
+  // apareciera en mas de un query (no deberia pasar entre accesorios y
+  // bundles, pero por seguridad), el primero que lo encuentra gana y los
+  // siguientes se ignoran.
+  const itemsById = new Map();
+  const maxPages = Number(MAX_PAGES);
+
+  for (const { label, query, apiVersion } of CATALOG_QUERIES) {
+    let cursor = undefined;
+    let fetched = 0;
+    const baseUrl = apiVersion === "v2" ? SEARCH_URL_V2 : SEARCH_URL;
+
+    for (let page = 0; page < maxPages; page++) {
+      const data = await fetchCatalogPage(query, cursor, baseUrl);
+      for (const it of data.data ?? []) {
+        if (itemsById.has(it.id)) continue;
+
+        // Filtro de seguridad: solo items creados por la cuenta oficial de
+        // Roblox (creatorTargetId "1" — la cuenta oficial es tecnicamente un
+        // "User" con ese ID, no existe un CreatorType "Roblox" en la API).
+        const isOfficialRoblox = String(it.creatorTargetId) === "1";
+        if (!isOfficialRoblox) continue;
+
+        // El campo real que devuelve este endpoint es "priceStatus" (ej.
+        // "Free", "Off Sale", o vacio/undefined cuando tiene precio normal).
+        // Se revisan tambien nombres alternativos por si la API cambia.
+        let forSale;
+        if (typeof it.priceStatus === "string") {
+          forSale = !/off\s*sale/i.test(it.priceStatus);
+        } else if (typeof it.isForSale === "boolean") {
+          forSale = it.isForSale;
+        } else if (typeof it.purchasable === "boolean") {
+          forSale = it.purchasable;
+        } else if (typeof it.isPurchasable === "boolean") {
+          forSale = it.isPurchasable;
+        } else if (typeof it.price === "number") {
+          // Los Bundles (via este query especifico) no traen NINGUNO de los
+          // campos de arriba. Como mejor senal disponible, se infiere que
+          // esta a la venta si trae un precio numerico. Es una inferencia,
+          // no una confirmacion directa de la API — se marca como
+          // "inferred" (no "true") para que el embed lo muestre distinto
+          // ("Likely Yes") en vez de afirmarlo con la misma certeza que un
+          // campo explicito.
+          forSale = "inferred";
+        } else {
+          forSale = undefined;
+        }
+
+        // assetType numerico (solo presente cuando itemType es "Asset", no
+        // en Bundles). Se resuelve a nombre legible ("Hat") y a la parte del
+        // avatar donde se coloca ("Head") via ASSET_TYPE_INFO.
+        const assetTypeId = typeof it.assetType === "number" ? it.assetType : null;
+        const { name: assetTypeName, bodySlot } = getAssetTypeInfo(assetTypeId);
+
+        // Taxonomia (ej. "Animation Bundle"): solo presente en Bundles via
+        // este query. Es informacion real y util para el campo "Item Tags"
+        // del embed, a diferencia de itemStatus que casi siempre viene
+        // vacio para Bundles.
+        const taxonomyTags = Array.isArray(it.taxonomy)
+          ? it.taxonomy.map((t) => t.taxonomyName).filter(Boolean)
+          : [];
+
+        itemsById.set(it.id, {
+          id: it.id,
+          name: it.name,
+          description: it.description ?? "",
+          price: it.price ?? null,
+          itemType: it.itemType ?? "Asset",
+          assetTypeId,
+          assetTypeName,
+          bodySlot,
+          forSale,
+          taxonomyTags,
+          createdUtc: it.itemCreatedUtc ?? null,
+          isLimited: Array.isArray(it.itemRestrictions)
+            ? it.itemRestrictions.some((r) => /limited/i.test(r))
+            : false,
+          // "Limited" = solo tiempo/cupo dinamico. "LimitedUnique" = cupo fijo
+          // desde el inicio (coleccionable numerado). Guardamos cual es porque
+          // cambia como se interpreta unitsAvailableForConsumption.
+          isLimitedUnique: Array.isArray(it.itemRestrictions)
+            ? it.itemRestrictions.some((r) => /limitedunique/i.test(r))
+            : false,
+          itemStatus: Array.isArray(it.itemStatus) ? it.itemStatus : [],
+          favoriteCount: typeof it.favoriteCount === "number" ? it.favoriteCount : null,
+          // Fecha limite de venta (null si no tiene). Campo real de la API:
+          // "offSaleDeadline".
+          offSaleDeadline: it.offSaleDeadline ?? null,
+          // Cupo restante para items Limited/LimitedUnique. null = sin cupo
+          // fijo o el campo no vino en esta respuesta.
+          unitsAvailableForConsumption:
+            typeof it.unitsAvailableForConsumption === "number"
+              ? it.unitsAvailableForConsumption
+              : null,
+        });
+        fetched++;
+      }
+      cursor = data.nextPageCursor;
+      if (!cursor) break;
+    }
+    console.log(`Query "${label}": ${fetched} item(s) nuevo(s) en esta corrida`);
+  }
+  return [...itemsById.values()];
+}
+
+// ---------- Roblox: revisar si items ya conocidos siguen a la venta ----------
+// items: [{ id, itemType }]. Antes esto forzaba itemType "Asset" para todo,
+// lo cual da resultados invalidos para bundles (itemType "Bundle").
+function detailsHeaders(csrfToken) {
+  return {
+    "Content-Type": "application/json",
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    Accept: "application/json",
+    Referer: "https://www.roblox.com/catalog",
+    Origin: "https://www.roblox.com",
+    ...(csrfToken ? { "x-csrf-token": csrfToken } : {}),
+  };
+}
+
+async function postDetailsChunk(chunk, csrfToken) {
+  return fetch(DETAILS_URL, {
+    method: "POST",
+    headers: detailsHeaders(csrfToken),
+    body: JSON.stringify({
+      items: chunk.map(({ id, itemType }) => ({ itemType: itemType || "Asset", id })),
+    }),
+  });
+}
+
+async function checkStillForSale(items) {
+  if (items.length === 0) return {};
+  const chunks = [];
+  for (let i = 0; i < items.length; i += 120) {
+    chunks.push(items.slice(i, i + 120));
+  }
+
+  const result = {};
+  for (const chunk of chunks) {
+    let res = await postDetailsChunk(chunk, cachedCsrfToken);
+
+    // Token ausente o vencido: Roblox lo entrega en el header de esta misma
+    // respuesta 403. Se cachea y se reintenta con el token nuevo.
+    //
+    // NOTA (julio 2026, v2): el fix anterior (subir de 1 a 3 intentos)
+    // seguia fallando de forma intermitente porque el loop se rendia en
+    // cuanto el header "x-csrf-token" del reintento devolvia EL MISMO
+    // valor que el que ya se habia probado -- pero Roblox a veces emite
+    // el mismo token en 403 consecutivos muy rapidos entre si (parece
+    // tener su propia ventana de cache de milisegundos para la emision
+    // del token), sin que eso signifique que el token sea invalido de
+    // forma permanente. Rendirse en ese caso tiraba a la basura intentos
+    // que todavia quedaban disponibles. Fix: solo abortar si Roblox NO
+    // manda ningun token en absoluto (ahi si no hay nada mas que probar).
+    // Si manda un token (igual o distinto al anterior), se reintenta
+    // igual, con una pausa corta entre intentos para darle tiempo a que
+    // el token realmente rote del lado de Roblox.
+    let attempts = 0;
+    while (res.status === 403 && attempts < 3) {
+      attempts += 1;
+      const freshToken = res.headers.get("x-csrf-token");
+      if (!freshToken) break;
+      cachedCsrfToken = freshToken;
+      await sleep(300 * attempts); // pausa creciente: 300ms, 600ms, 900ms
+      res = await postDetailsChunk(chunk, cachedCsrfToken);
+    }
+
+    if (!res.ok) {
+      const bodyText = await res.text().catch(() => "(no se pudo leer el cuerpo)");
+      console.error(
+        `Details check fallo: ${res.status} ${res.statusText} — body: ${bodyText.slice(0, 300)}`
+      );
+      continue;
+    }
+    const data = await res.json();
+    if (!loggedSampleDetailsItem && (data.data ?? []).length > 0) {
+      loggedSampleDetailsItem = true;
+      console.log("Muestra cruda de un item (verificacion de campos):", JSON.stringify(data.data[0]));
+    }
+    for (const it of data.data ?? []) {
+      // Mismo orden de prioridad que fetchCurrentItems: priceStatus es el
+      // campo real confirmado de la API. "purchasable"/"isPurchasable" eran
+      // nombres de respaldo sin confirmar — al no existir en la respuesta
+      // real, el "?? false" anterior marcaba TODO como fuera de venta.
+      // Ahora, si no hay ninguna senal clara, se deja undefined (desconocido)
+      // en vez de asumir false, para no generar falsos "removed from sale".
+      let forSale;
+      if (typeof it.priceStatus === "string") {
+        forSale = !/off\s*sale/i.test(it.priceStatus);
+      } else if (typeof it.isForSale === "boolean") {
+        forSale = it.isForSale;
+      } else if (typeof it.purchasable === "boolean") {
+        forSale = it.purchasable;
+      } else if (typeof it.isPurchasable === "boolean") {
+        forSale = it.isPurchasable;
+      } else {
+        forSale = undefined;
+      }
+      result[it.id] = {
+        purchasable: forSale,
+        offSaleDeadline: it.offSaleDeadline ?? null,
+        unitsAvailableForConsumption:
+          typeof it.unitsAvailableForConsumption === "number"
+            ? it.unitsAvailableForConsumption
+            : null,
+      };
+    }
+  }
+  return result;
+}
+
+// ---------- Integracion Rolimons (opcional) ----------
+// Rolimons corre su propio bot en Discord que detecta items nuevos y
+// Limiteds, tipicamente antes que nosotros (no depende del mismo indice de
+// busqueda por categoria que usa catalog.roproxy.com, que tiene el retraso
+// de cache de Roblox ya documentado). Un webhook no puede LEER mensajes,
+// asi que esto necesita un bot propio (token distinto al webhook) con
+// permiso de ver esos 2 canales.
+const ROLIMONS_ENABLED = Boolean(DISCORD_BOT_TOKEN && (ROLIMONS_CHANNEL_ID || ROLIMONS_LIMITED_CHANNEL_ID));
+let loggedSampleRolimonsHydration = false; // igual que loggedSampleDetailsItem: verificar una vez que los campos vengan como se espera
+
+// Roblox pone el ID numerico real del item en la URL del catalogo. Los
+// campos "Collectible Item ID"/"Collectible Product ID" que a veces trae el
+// embed de Rolimons son UUIDs internos (con guiones y letras) del sistema
+// de Limiteds, NO el ID de catalogo -- este regex los ignora solos porque
+// busca solo digitos.
+const ROLIMONS_ID_PATTERN = /roblox\.com\/catalog\/(\d+)/i;
+
+function extractItemIdsFromDiscordMessage(message) {
+  const found = new Set();
+  const sources = [message.content || ""];
+  for (const embed of message.embeds || []) {
+    if (embed.title) sources.push(embed.title);
+    if (embed.description) sources.push(embed.description);
+    if (embed.url) sources.push(embed.url);
+    for (const field of embed.fields || []) sources.push(`${field.name} ${field.value}`);
+  }
+  for (const text of sources) {
+    const m = text.match(ROLIMONS_ID_PATTERN);
+    if (m) found.add(m[1]);
+  }
+  return [...found];
+}
+
+// Cursor de "ultimo mensaje visto" guardado DENTRO del mismo objeto state
+// (se persiste junto con todo lo demas en el saveState(state) de siempre,
+// no hace falta un cliente Redis aparte).
+async function pollDiscordChannel(state, channelId, cursorField) {
+  if (!DISCORD_BOT_TOKEN || !channelId) return [];
+
+  const url = new URL(`https://discord.com/api/v10/channels/${channelId}/messages`);
+  url.searchParams.set("limit", "50");
+  if (state[cursorField]) url.searchParams.set("after", state[cursorField]);
+
+  let res;
+  try {
+    res = await fetch(url, { headers: { Authorization: `Bot ${DISCORD_BOT_TOKEN}` } });
+  } catch (err) {
+    console.error(`[Rolimons] Error de red consultando canal ${channelId}:`, err.message);
+    return [];
+  }
+  if (!res.ok) {
+    console.error(`[Rolimons] Discord API fallo (canal ${channelId}): ${res.status} ${await res.text()}`);
+    return [];
+  }
+
+  const messages = await res.json(); // vienen del mas nuevo al mas viejo
+  if (messages.length === 0) return [];
+
+  // Snowflakes de Discord son ordenables como string por tiempo de creacion
+  state[cursorField] = messages[0].id;
+
+  const allIds = new Set();
+  for (const msg of messages) {
+    for (const id of extractItemIdsFromDiscordMessage(msg)) allIds.add(id);
+  }
+  console.log(`[Rolimons] Canal ${channelId}: ${messages.length} mensaje(s) nuevo(s), ${allIds.size} item ID(s) extraidos.`);
+  return [...allIds];
+}
+
+// Pide los detalles completos de items sueltos por ID (no vienen de una
+// busqueda por categoria, asi que no tenemos su fila de fetchCurrentItems
+// todavia). Reusa el mismo endpoint/CSRF que checkStillForSale, pero
+// extrae TODOS los campos que necesita el pipeline normal de "item nuevo"
+// (name, price, isLimited, assetType, etc.), no solo forSale/deadline/units
+// como hace checkStillForSale.
+async function fetchItemFullDetails(ids) {
+  if (ids.length === 0) return [];
+  // itemType real desconocido de antemano (Rolimons no lo manda en un campo
+  // separado, solo en el titulo). "Asset" cubre el caso mas comun
+  // (accesorios); si algun dia Rolimons postea un Bundle en estos canales,
+  // esa fila puntual puede volver con datos vacios -- se veria en el log de
+  // muestra de abajo si pasa.
+  const chunk = ids.map((id) => ({ id: Number(id), itemType: "Asset" }));
+
+  let res = await postDetailsChunk(chunk, cachedCsrfToken);
+  let attempts = 0;
+  while (res.status === 403 && attempts < 3) {
+    attempts += 1;
+    const freshToken = res.headers.get("x-csrf-token");
+    if (!freshToken) break;
+    cachedCsrfToken = freshToken;
+    await sleep(300 * attempts);
+    res = await postDetailsChunk(chunk, cachedCsrfToken);
+  }
+  if (!res.ok) {
+    console.error(`[Rolimons] fetchItemFullDetails fallo: ${res.status} ${await res.text().catch(() => "")}`);
+    return [];
+  }
+
+  const data = await res.json();
+  const rawItems = data.data ?? [];
+  if (!loggedSampleRolimonsHydration && rawItems.length > 0) {
+    loggedSampleRolimonsHydration = true;
+    console.log("[Rolimons] Muestra cruda de un item hidratado (verificar campos):", JSON.stringify(rawItems[0]));
+  }
+
+  // Mismo mapeo de campos que fetchCurrentItems, aplicado a este endpoint
+  // en vez de al de busqueda -- si algun nombre de campo difiere entre los
+  // 2 endpoints, va a saltar a la vista en el log de muestra de arriba.
+  return rawItems.map((it) => {
+    let forSale;
+    if (typeof it.priceStatus === "string") forSale = !/off\s*sale/i.test(it.priceStatus);
+    else if (typeof it.isForSale === "boolean") forSale = it.isForSale;
+    else if (typeof it.purchasable === "boolean") forSale = it.purchasable;
+    else if (typeof it.isPurchasable === "boolean") forSale = it.isPurchasable;
+    else if (typeof it.price === "number") forSale = "inferred";
+    else forSale = undefined;
+
+    const assetTypeId = typeof it.assetType === "number" ? it.assetType : null;
+    const { name: assetTypeName, bodySlot } = getAssetTypeInfo(assetTypeId);
+
+    return {
+      id: it.id,
+      name: it.name,
+      description: it.description ?? "",
+      price: it.price ?? null,
+      itemType: it.itemType ?? "Asset",
+      assetTypeId,
+      assetTypeName,
+      bodySlot,
+      forSale,
+      taxonomyTags: [],
+      createdUtc: it.itemCreatedUtc ?? null,
+      isLimited: Array.isArray(it.itemRestrictions)
+        ? it.itemRestrictions.some((r) => /limited/i.test(r))
+        : false,
+      isLimitedUnique: Array.isArray(it.itemRestrictions)
+        ? it.itemRestrictions.some((r) => /limitedunique/i.test(r))
+        : false,
+      itemStatus: Array.isArray(it.itemStatus) ? it.itemStatus : [],
+      favoriteCount: typeof it.favoriteCount === "number" ? it.favoriteCount : null,
+      offSaleDeadline: it.offSaleDeadline ?? null,
+      unitsAvailableForConsumption:
+        typeof it.unitsAvailableForConsumption === "number" ? it.unitsAvailableForConsumption : null,
+    };
+  });
+}
+
+// Candidatos del canal de "New Item": ids que Rolimons ya vio y todavia no
+// estan en el catalogo de esta corrida (current) ni en state.known. Se
+// hidratan y devuelven en el MISMO formato que fetchCurrentItems, para que
+// tick() los pueda concatenar a "current" y listo -- pasan por exactamente
+// el mismo camino de siempre (filtro de frescura, embed, notify, state.known).
+async function fetchRolimonsNewItemRows(state, alreadyPresentIds) {
+  if (!ROLIMONS_ENABLED || !ROLIMONS_CHANNEL_ID) return [];
+  const seenIds = await pollDiscordChannel(state, ROLIMONS_CHANNEL_ID, "rolimonsNewCursor");
+  const toHydrate = seenIds.filter((id) => !state.known[id] && !alreadyPresentIds.has(id));
+  if (toHydrate.length === 0) return [];
+  console.log(`[Rolimons] ${toHydrate.length} candidato(s) nuevo(s) de Rolimons a hidratar:`, toHydrate.join(", "));
+  return fetchItemFullDetails(toHydrate);
+}
+
+// ---------- Notificaciones ----------
+function robloxThumbnailUrl(assetId) {
+  return `https://www.roblox.com/asset-thumbnail/image?assetId=${assetId}&width=150&height=150&format=png`;
+}
+
+function robloxItemUrl(assetId) {
+  return `https://www.roblox.com/catalog/${assetId}`;
+}
+
+async function fetchThumbnailUrl(id, itemType) {
+  try {
+    // Los bundles NO son assets — tienen su propio namespace de IDs y su
+    // propio endpoint de thumbnails. Usar el endpoint de assets con un ID de
+    // bundle devuelve una imagen equivocada (o la misma para todos), que es
+    // justo el bug reportado.
+    const url =
+      itemType === "Bundle"
+        ? `https://thumbnails.roproxy.com/v1/bundles/thumbnail?bundleIds=${id}&size=150x150&format=png&isCircular=false`
+        : `https://thumbnails.roproxy.com/v1/assets?assetIds=${id}&size=150x150&format=png&isCircular=false`;
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      },
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data?.data?.[0]?.imageUrl ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// Envia UN mensaje "Item Update" con todos los embeds de esta corrida,
+// agrupados por categoria (Bundles primero, luego Accesorios/Assets). Cada
+// grupo lleva un embed "divisor" a modo de encabezado de seccion. Discord
+// permite max 10 embeds por mensaje, asi que si hay mas se manda en varios
+// mensajes seguidos (solo el primero menciona el rol, para no spamear ping).
+function sectionHeaderEmbed(label, count) {
+  return {
+    title: label,
+    description: `${count} update${count === 1 ? "" : "s"} detected this run`,
+    color: 0x2f3136,
+  };
+}
+
+// Devuelve los embeds que NO se pudieron entregar (para reintentarlos en la
+// proxima corrida en vez de perderlos). Antes solo se atrapaban errores de red
+// y un 400/429/5xx de Discord se perdia en silencio.
+async function sendDigest(embeds) {
+  if (embeds.length === 0) return [];
+  const chunks = [];
+  for (let i = 0; i < embeds.length; i += 10) chunks.push(embeds.slice(i, i + 10));
+
+  const failed = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const mention = i === 0 && Boolean(DISCORD_ROLE_ID);
+    let delivered = false;
+    for (let attempt = 1; attempt <= 3 && !delivered; attempt++) {
+      try {
+        const res = await fetch(DISCORD_WEBHOOK_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            content: i === 0 ? (mention ? `<@&${DISCORD_ROLE_ID}>` : undefined) : undefined,
+            allowed_mentions: mention ? { roles: [DISCORD_ROLE_ID] } : { parse: [] },
+            embeds: chunks[i],
+          }),
+        });
+        if (res.ok) {
+          delivered = true;
+        } else if (res.status === 429) {
+          const body = await res.json().catch(() => ({}));
+          const waitMs = Math.min(15000, Math.ceil((body.retry_after ?? 2) * 1000) + 200);
+          console.error(`Discord 429 (rate limit), esperando ${waitMs}ms (intento ${attempt}/3)`);
+          await sleep(waitMs);
+        } else {
+          console.error(`Discord rechazo el digest: ${res.status} ${await res.text().catch(() => "")}`);
+          break; // 4xx/5xx que no es rate limit: no tiene sentido reintentar en el acto
+        }
+      } catch (err) {
+        console.error("Error notificando a Discord:", err);
+        await sleep(1000);
+      }
+    }
+    if (!delivered) failed.push(...chunks[i]);
+    if (i < chunks.length - 1) await sleep(1200); // margen para el rate limit de webhooks
+  }
+  return failed;
+}
+
+async function notifyRoblox(payload) {
+  const res = await fetch(MESSAGING_URL(UNIVERSE_ID, MESSAGING_TOPIC), {
+    method: "POST",
+    headers: {
+      "x-api-key": ROBLOX_API_KEY,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ message: JSON.stringify(payload) }),
+  });
+  if (!res.ok) {
+    console.error(`MessagingService fallo: ${res.status} ${await res.text()}`);
+    return false;
+  }
+  return true;
+}
+
+// Version que, si notifyRoblox falla (ej. "publish limit exceeded" cuando se
+// detectan muchos items de golpe), guarda el payload en state.pendingGameSync
+// para reintentarlo en la proxima corrida en vez de perderlo silenciosamente.
+// El item SI se sigue marcando como "known" (para no repetir el aviso de
+// Discord cada 5 min), pero el juego recibira el dato en cuanto se reintente
+// con exito.
+async function notifyRobloxWithRetry(state, payload) {
+  const ok = await notifyRoblox(payload);
+  if (!ok) {
+    state.pendingGameSync.push(payload);
+  }
+  // Pequena pausa entre publicaciones sucesivas para no ráfaguear el limite
+  // de MessagingService cuando se detectan muchos items en una sola corrida
+  // (ej. la primera vez que corre un query nuevo).
+  await sleep(1100);
+}
+
+// ---------- Ciclo principal ----------
+// Estado de la corrida actual, para poder guardarlo si GitHub Actions cancela o
+// corta el job (SIGTERM) antes de llegar al saveState final.
+let currentState = null;
+let shuttingDown = false;
+process.on("SIGTERM", async () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.error("SIGTERM recibido (cancelacion/timeout del job): guardando estado antes de salir...");
+  try {
+    if (currentState) await saveState(currentState);
+  } catch (err) {
+    console.error("No se pudo guardar el estado en SIGTERM:", err);
+  }
+  process.exit(143);
+});
+
+async function tick() {
+  const state = await loadState();
+  currentState = state;
+  state.pendingGameSync ??= []; // compatibilidad con state.json de corridas viejas
+  state.pendingDigest ??= []; // avisos de Discord pendientes (ver pushEmbed)
+
+  // Reintentar primero los mensajes que no pudieron publicarse en la corrida
+  // anterior (ej. por "publish limit exceeded"), antes de generar mensajes
+  // nuevos. Los que vuelvan a fallar se quedan en la cola para la siguiente.
+  if (state.pendingGameSync.length > 0) {
+    console.log(`Reintentando ${state.pendingGameSync.length} mensaje(s) pendiente(s) de la corrida anterior...`);
+    const stillPending = [];
+    for (const payload of state.pendingGameSync) {
+      const ok = await notifyRoblox(payload);
+      if (!ok) stillPending.push(payload);
+      await sleep(1100);
+    }
+    state.pendingGameSync = stillPending;
+    console.log(`Pendientes resueltos: ${state.pendingGameSync.length === 0 ? "todos" : `quedan ${stillPending.length}`}`);
+  }
+
+  let current;
+  try {
+    current = await fetchCurrentItems();
+  } catch (err) {
+    console.error("Error consultando catalogo:", err.message);
+    return;
+  }
+
+  // Rolimons (opcional): candidatos que ese bot ya vio y nuestra propia
+  // busqueda por categoria todavia no alcanzo. Se agregan a "current" ANTES
+  // de calcular currentIds, asi entran a exactamente el mismo pipeline que
+  // el resto (filtro de frescura, embed "New Item", notifyRobloxWithRetry,
+  // state.known) sin ningun camino especial.
+  if (ROLIMONS_ENABLED) {
+    try {
+      const alreadyPresentIds = new Set(current.map((i) => String(i.id)));
+      const rolimonsRows = await fetchRolimonsNewItemRows(state, alreadyPresentIds);
+      current = current.concat(rolimonsRows);
+    } catch (err) {
+      console.error("[Rolimons] Error en fetchRolimonsNewItemRows:", err.message);
+    }
+  }
+
+  const currentIds = new Set(current.map((i) => String(i.id)));
+  // Number("") es 0, no NaN — si el secret FEATURED_MIN_PRICE no existe,
+  // GitHub Actions manda un string vacio (no "undefined"), lo que rompia el
+  // default del destructuring de arriba y dejaba minValue en 0 (por eso
+  // CUALQUIER item con precio se marcaba "High Value"). Este fallback cubre
+  // ese caso sin depender de que el secret exista.
+  const minValue = Number(FEATURED_MIN_PRICE) || 1000;
+  const dateLabel = (ts) =>
+    ts
+      ? new Date(ts).toLocaleString("en-US", {
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+        })
+      : "None";
+  const qtyLabel = (n) => (n != null ? n.toLocaleString("en-US") : "Unlimited");
+
+  // Embeds construidos esta corrida, agrupados por itemType para el digest
+  // final ("Item Update"). No se manda nada a Discord hasta el final del
+  // tick; el juego (notifyRoblox) si recibe cada evento en tiempo real.
+  // OJO (Octubre 2026): los embeds viven en state.pendingDigest (se guarda con
+  // el resto del estado). Asi un item marcado como "known" y su aviso de Discord
+  // se persisten JUNTOS: si la corrida se corta (timeout / cancelacion de
+  // GitHub Actions) el aviso pendiente se manda en la siguiente corrida, y si
+  // el estado no llega a guardarse el item vuelve a detectarse (nunca quedan
+  // "avisos repetidos" por un estado sin guardar ni avisos perdidos).
+  state.pendingDigest ??= [];
+  const pushEmbed = (itemType, embed) => {
+    state.pendingDigest.push({ t: itemType || "Asset", embed });
+  };
+
+  // 1) Items nuevos (aparecen ahora, no estaban en el estado).
+  // OJO: "nuevo para el bot" no es lo mismo que "nuevo en Roblox". Con
+  // SortType=6 (RecentlyCreated/RecentlyUpdated), items clasicos que Roblox
+  // toca en bloque (ej. migraciones de metadata) tambien suben al tope del
+  // ordenamiento y aparecen aqui la primera vez que el bot los ve, aunque
+  // tengan anios. Se filtran por itemCreatedUtc real antes de notificar: si
+  // el item es viejo, se guarda igual como conocido (para no reprocesarlo
+  // cada ciclo) pero SIN disparar notificacion a Discord/juego.
+  const ITEM_FRESHNESS_THRESHOLD_MS = 5 * 24 * 60 * 60 * 1000; // 5 dias
+  const allNewItems = current.filter((i) => !state.known[i.id]);
+  const newItems = [];
+
+  for (const item of allNewItems) {
+    const createdAt = item.createdUtc ? new Date(item.createdUtc).getTime() : null;
+    const ageMs = createdAt != null && !Number.isNaN(createdAt) ? Date.now() - createdAt : null;
+    // Bug reportado (Octubre 2026): Roblox crea muchos items VARIOS DIAS (o semanas)
+    // antes de ponerlos a la venta, asi que itemCreatedUtc solo no sirve para
+    // saber si algo "salio nuevo": un lanzamiento real se descartaba en silencio
+    // como "antiguo". La etiqueta "New" que pone Roblox (itemStatus) si indica
+    // lanzamiento reciente, asi que un item con esa etiqueta NUNCA se descarta.
+    const hasNewTag = (item.itemStatus ?? []).some((s) => /new/i.test(s));
+    const isStale = ageMs != null && ageMs > ITEM_FRESHNESS_THRESHOLD_MS && !hasNewTag;
+
+    if (isStale) {
+      console.log(
+        `Item antiguo detectado por primera vez (creado ${item.createdUtc}, forSale=${item.forSale}, price=${item.price}, status=[${(item.itemStatus ?? []).join(",")}]), se agrega como conocido sin notificar: ${item.name} (${item.id})`
+      );
+      // Se guarda como conocido "silenciosamente" para que no se re-evalue
+      // en cada tick, pero saltando todo el bloque de abajo (pushEmbed,
+      // notifyRobloxWithRetry): nunca genera notificacion.
+      state.known[item.id] = {
+        name: item.name,
+        price: item.price,
+        forSale: item.forSale !== false,
+        itemType: item.itemType,
+        assetTypeId: item.assetTypeId,
+        assetTypeName: item.assetTypeName,
+        bodySlot: item.bodySlot,
+        taxonomyTags: item.taxonomyTags ?? [],
+        isLimited: item.isLimited,
+        isLimitedUnique: item.isLimitedUnique,
+        offSaleDeadline: item.offSaleDeadline ?? null,
+        unitsAvailableForConsumption: item.unitsAvailableForConsumption ?? null,
+        originalUnits: item.unitsAvailableForConsumption ?? null,
+        isHighValue: false,
+        firstSeenAt: Date.now(),
+        skippedAsOld: true, // visible en DEBUG_CHECK_IDS: lo vio pero lo silencio el filtro de frescura
+      };
+      continue;
+    }
+    newItems.push(item);
+  }
+
+  let processedNew = 0;
+  for (const item of newItems) {
+    // Checkpoint: si hay muchos items nuevos de golpe (cada uno tarda ~1-3 s por la
+    // pausa de MessagingService + miniatura), guardar de a ratos evita que un corte
+    // a mitad de corrida lo repita todo en la siguiente.
+    if (processedNew > 0 && processedNew % 10 === 0) await saveState(state);
+    processedNew += 1;
+    console.log(`New item detected: ${item.name} (${item.id})`);
+    const saleLabel =
+      item.forSale === true
+        ? "Yes"
+        : item.forSale === "inferred"
+        ? "Likely (inferred from price)"
+        : item.forSale === false
+        ? "No"
+        : "Unknown";
+    const isNew = item.itemStatus.some((s) => /new/i.test(s));
+    const allTags = [...item.itemStatus, ...(item.taxonomyTags ?? [])];
+    const tagsLabel = allTags.length > 0 ? allTags.join(", ") : "None";
+    // Si el item no esta a la venta, el precio que trae la API puede ser un
+    // valor residual sin sentido (ej. "1"). Mostramos "None" en ese caso en
+    // vez de un numero enganoso.
+    const priceLabel = item.forSale === false ? "None" : item.price != null ? `${item.price} R$` : "N/A";
+    const thumbnailUrl = (await fetchThumbnailUrl(item.id, item.itemType)) || robloxThumbnailUrl(item.id);
+    const isHighValue = item.forSale !== false && item.price != null && item.price >= minValue;
+    // Para accesorios individuales mostramos el tipo especifico (ej. "Hat",
+    // "Neck Accessory"); para bundles no hay assetType, asi que cae al
+    // itemType general ("Bundle").
+    const typeLabel = item.assetTypeName ?? item.itemType;
+    // "Units Available" solo tiene sentido para items Limited/LimitedUnique
+    // con cupo real. Para items normales este campo puede venir en 0 sin
+    // significar "agotado" — simplemente no aplica, y mostrar "0" ahi
+    // confundia (por eso el bug reportado).
+    const unitsLabel = item.isLimited || item.isLimitedUnique ? qtyLabel(item.unitsAvailableForConsumption) : "N/A (not limited)";
+
+    pushEmbed(item.itemType, {
+      title: `✨ New Item - ${item.name}`,
+      description: item.description || undefined,
+      url: robloxItemUrl(item.id),
+      color: item.forSale === false ? 0xf1c40f : isHighValue ? 0xe67e22 : 0x2ecc71,
+      thumbnail: { url: thumbnailUrl },
+      timestamp: new Date().toISOString(),
+      fields: [
+        { name: "🆔 ID", value: String(item.id), inline: true },
+        { name: "📦 Type", value: typeLabel, inline: true },
+        { name: "🧍 Body Slot", value: item.bodySlot ?? "N/A", inline: true },
+        { name: "💵 Price", value: priceLabel, inline: true },
+        { name: "🔒 Limited?", value: item.isLimitedUnique ? "Yes (fixed qty)" : item.isLimited ? "Yes" : "No", inline: true },
+        { name: "💸 On Sale?", value: saleLabel, inline: true },
+        { name: "🆕 New Tag?", value: isNew ? "Yes" : "No", inline: true },
+        { name: "⏰ Sale Deadline", value: dateLabel(item.offSaleDeadline), inline: true },
+        { name: "📦 Units Available", value: unitsLabel, inline: true },
+        { name: "🌟 High Value?", value: isHighValue ? "Yes" : "No", inline: true },
+        { name: "💎 Item Tags", value: tagsLabel, inline: false },
+      ],
+    });
+
+    await notifyRobloxWithRetry(state, {
+      type: "ITEM_ADDED",
+      id: item.id,
+      name: item.name,
+      itemType: item.itemType,
+      assetTypeId: item.assetTypeId,
+      assetTypeName: item.assetTypeName,
+      bodySlot: item.bodySlot,
+      price: item.forSale === false ? null : item.price,
+      // Se manda un booleano limpio al juego (Lua no deberia tener que
+      // lidiar con el estado interno "inferred" que usamos solo para el
+      // texto del embed de Discord). Un valor no confirmado por la API se
+      // trata como "probablemente si" salvo que se demuestre lo contrario.
+      forSale: item.forSale !== false,
+      // Aparte, se informa si ese "true" es un dato confirmado por la API o
+      // una inferencia nuestra (ej. Bundles que no traen priceStatus). El
+      // juego puede usar esto para, por ejemplo, mostrar un badge "?" en
+      // vez de tratarlo con la misma certeza que un item confirmado.
+      forSaleConfirmed: item.forSale === true || item.forSale === false,
+      isLimited: item.isLimited,
+      isLimitedUnique: item.isLimitedUnique,
+      offSaleDeadline: item.offSaleDeadline,
+      unitsAvailableForConsumption: item.unitsAvailableForConsumption,
+      unitsSold: 0,
+      isHighValue,
+      favoriteCount: item.favoriteCount,
+    });
+    state.known[item.id] = {
+      name: item.name,
+      price: item.price,
+      forSale: item.forSale !== false,
+      itemType: item.itemType,
+      assetTypeId: item.assetTypeId,
+      assetTypeName: item.assetTypeName,
+      bodySlot: item.bodySlot,
+      taxonomyTags: item.taxonomyTags ?? [],
+      isLimited: item.isLimited,
+      isLimitedUnique: item.isLimitedUnique,
+      offSaleDeadline: item.offSaleDeadline ?? null,
+      unitsAvailableForConsumption: item.unitsAvailableForConsumption ?? null,
+      // Cupo original visto la primera vez que detectamos el item. Sirve de
+      // base para calcular "unidades vendidas" en LimitedUnique. OJO: si el
+      // bot arranca despues de que ya se vendieron algunas, esto no sera el
+      // total real desde el lanzamiento, solo desde que el bot lo detecto.
+      originalUnits: item.unitsAvailableForConsumption ?? null,
+      isHighValue,
+      firstSeenAt: Date.now(),
+    };
+  }
+
+  // 1.5) Rolimons "New Limited": items que se volvieron Limited. Dos casos:
+  //   a) Ya estaba en state.known (lo veniamos vendiendo como compra
+  //      directa) -> avisar YA con isLimited=true explicito, sin esperar
+  //      la revalidacion periodica de 5 min de mas abajo. El payload
+  //      ITEM_RELISTED normal (bloque 2.5) NUNCA trae isLimited -- este es
+  //      justo el caso que lo completa.
+  //   b) Recien se agrego a state.known EN ESTE MISMO tick (bloque 1 de
+  //      arriba, si tambien lo posteo el canal de "New Item") -> si ya
+  //      quedo con isLimited=true real (desde itemRestrictions), no hay
+  //      nada que hacer aca, se salta solo (evita el evento duplicado).
+  //   c) No esta en state.known en absoluto todavia -> no se procesa aca;
+  //      si es genuinamente nuevo deberia aparecer tambien en el canal de
+  //      "New Item" de Rolimons y entrar por el bloque 1 normal.
+  if (ROLIMONS_ENABLED && ROLIMONS_LIMITED_CHANNEL_ID) {
+    try {
+      const limitedIds = await pollDiscordChannel(state, ROLIMONS_LIMITED_CHANNEL_ID, "rolimonsLimitedCursor");
+      for (const idStr of limitedIds) {
+        const known = state.known[idStr];
+        if (!known || known.isLimited === true) continue; // caso b/c de arriba
+
+        console.log(`[Rolimons] ${known.name} (${idStr}) se volvio Limited -- avisando ya, sin esperar la revalidacion periodica.`);
+        known.isLimited = true;
+
+        const thumbnailUrl = (await fetchThumbnailUrl(idStr, known.itemType)) || robloxThumbnailUrl(idStr);
+        pushEmbed(known.itemType, {
+          title: `🔒 Became Limited (via Rolimons) - ${known.name}`,
+          url: robloxItemUrl(idStr),
+          color: 0x9b59b6,
+          thumbnail: { url: thumbnailUrl },
+          timestamp: new Date().toISOString(),
+          fields: [
+            { name: "🆔 ID", value: String(idStr), inline: true },
+            { name: "📦 Type", value: known.assetTypeName ?? known.itemType, inline: true },
+          ],
+        });
+
+        await notifyRobloxWithRetry(state, {
+          type: "ITEM_RELISTED",
+          id: Number(idStr),
+          name: known.name,
+          itemType: known.itemType,
+          assetTypeId: known.assetTypeId,
+          assetTypeName: known.assetTypeName,
+          bodySlot: known.bodySlot,
+          // Explicito: CatalogUpdateListener.fillLimitedFields ya prefiere
+          // este campo sobre el fallback conservador cuando no viene nil,
+          // no hace falta tocar nada del lado de Studio.
+          isLimited: true,
+          isLimitedUnique: known.isLimitedUnique === true,
+        });
+      }
+    } catch (err) {
+      console.error("[Rolimons] Error procesando canal de Limiteds:", err.message);
+    }
+  }
+
+  // 2) Items que ya conociamos y hay que reconfirmar contra el endpoint de
+  // detalles. Dos casos se combinan aqui:
+  //   a) Items que ya no aparecen en la busqueda actual (pueden estar fuera
+  //      de la primera(s) pagina(s) simplemente por orden, asi que se
+  //      reconfirman antes de avisar que salieron de venta).
+  //   b) Cada FULL_RECHECK_INTERVAL_MS, TODOS los items marcados forSale:true
+  //      se reconfirman, incluso si siguen apareciendo en la busqueda — un
+  //      item puede volverse Limited (dejar de ser comprable directo) sin
+  //      desaparecer de los resultados de esa categoria, y (a) por si solo
+  //      nunca lo habria detectado.
+  const FULL_RECHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutos
+  const now = Date.now();
+  const dueForFullRecheck =
+    !state.lastFullRecheckAt || now - state.lastFullRecheckAt >= FULL_RECHECK_INTERVAL_MS;
+
+  const idsToVerifySet = new Set(
+    Object.keys(state.known).filter((id) => state.known[id].forSale && !currentIds.has(id))
+  );
+  if (dueForFullRecheck) {
+    for (const id of Object.keys(state.known)) {
+      if (state.known[id].forSale) idsToVerifySet.add(id);
+    }
+    state.lastFullRecheckAt = now;
+    console.log(
+      `Revalidacion periodica completa: revisando ${idsToVerifySet.size} item(s) conocido(s) marcados a la venta`
+    );
+  }
+  const missingIds = [...idsToVerifySet];
+
+  if (missingIds.length > 0) {
+    const status = await checkStillForSale(
+      missingIds.map((id) => ({ id: Number(id), itemType: state.known[id].itemType }))
+    );
+    for (const id of missingIds) {
+      const stillForSale = status[id]?.purchasable;
+      if (stillForSale === true) {
+        delete state.known[id].removeStrikes;
+      }
+      if (stillForSale === false) {
+        const item = state.known[id];
+        // Histeresis (Octubre 2026): una sola respuesta "no comprable" de roproxy puede ser
+        // un falso positivo y generaba ciclos "Removed -> Relisted" repetidos en Discord. Se
+        // exige que se confirme en 2 revalidaciones seguidas antes de avisar.
+        item.removeStrikes = (item.removeStrikes ?? 0) + 1;
+        if (item.removeStrikes < 2) {
+          console.log(`Posible salida de venta (1/2, se confirma en la proxima revalidacion): ${item.name} (${id})`);
+          continue;
+        }
+        delete item.removeStrikes;
+        console.log(`Item removed from sale: ${item.name} (${id})`);
+        const thumbnailUrl = (await fetchThumbnailUrl(id, item.itemType)) || robloxThumbnailUrl(id);
+        const typeLabel = item.assetTypeName ?? item.itemType;
+
+        pushEmbed(item.itemType, {
+          title: `📉 Item Removed From Sale - ${item.name}`,
+          url: robloxItemUrl(id),
+          color: 0xe74c3c,
+          thumbnail: { url: thumbnailUrl },
+          timestamp: new Date().toISOString(),
+          fields: [
+            { name: "🆔 ID", value: String(id), inline: true },
+            { name: "📦 Type", value: typeLabel, inline: true },
+            { name: "🧍 Body Slot", value: item.bodySlot ?? "N/A", inline: true },
+            { name: "💵 Last Price", value: item.price != null ? `${item.price} R$` : "N/A", inline: true },
+          ],
+        });
+        await notifyRobloxWithRetry(state, {
+          type: "ITEM_REMOVED",
+          id: Number(id),
+          name: item.name,
+          itemType: item.itemType,
+          assetTypeId: item.assetTypeId,
+          assetTypeName: item.assetTypeName,
+          bodySlot: item.bodySlot,
+        });
+        state.known[id].forSale = false;
+      }
+      // si stillForSale es true o undefined (fallo de red), no hacemos nada:
+      // seguimos considerandolo a la venta y lo reintentamos el proximo ciclo
+    }
+  }
+
+  // 2.5) Autocorreccion: items marcados forSale:false (por un ITEM_REMOVED
+  // anterior, sea correcto o un falso positivo de un bug ya corregido) que
+  // en realidad siguen o volvieron a estar a la venta. Se revisan en la
+  // misma revalidacion periodica de 5 min que el paso 2, para no sumar
+  // llamadas extra a la API fuera de ese intervalo.
+  if (dueForFullRecheck) {
+    const offSaleIds = Object.keys(state.known).filter((id) => state.known[id].forSale === false);
+    if (offSaleIds.length > 0) {
+      const relistStatus = await checkStillForSale(
+        offSaleIds.map((id) => ({ id: Number(id), itemType: state.known[id].itemType }))
+      );
+      for (const id of offSaleIds) {
+        if (relistStatus[id]?.purchasable !== true) {
+          delete state.known[id].relistStrikes;
+          continue;
+        }
+        if (relistStatus[id]?.purchasable === true && !notifiedRelistedThisProcess.has(id)) {
+          const item = state.known[id];
+          // Misma histeresis que en la salida de venta: 2 confirmaciones seguidas.
+          item.relistStrikes = (item.relistStrikes ?? 0) + 1;
+          if (item.relistStrikes < 2) {
+            console.log(`Posible relist (1/2, se confirma en la proxima revalidacion): ${item.name} (${id})`);
+            continue;
+          }
+          delete item.relistStrikes;
+          notifiedRelistedThisProcess.add(id);
+          console.log(`Item relisted (vuelve a la venta): ${item.name} (${id})`);
+          const thumbnailUrl = (await fetchThumbnailUrl(id, item.itemType)) || robloxThumbnailUrl(id);
+          const typeLabel = item.assetTypeName ?? item.itemType;
+
+          pushEmbed(item.itemType, {
+            title: `📈 Item Relisted - ${item.name}`,
+            url: robloxItemUrl(id),
+            color: 0x2ecc71,
+            thumbnail: { url: thumbnailUrl },
+            timestamp: new Date().toISOString(),
+            fields: [
+              { name: "🆔 ID", value: String(id), inline: true },
+              { name: "📦 Type", value: typeLabel, inline: true },
+              { name: "🧍 Body Slot", value: item.bodySlot ?? "N/A", inline: true },
+            ],
+          });
+          await notifyRobloxWithRetry(state, {
+            type: "ITEM_RELISTED",
+            id: Number(id),
+            name: item.name,
+            itemType: item.itemType,
+            assetTypeId: item.assetTypeId,
+            assetTypeName: item.assetTypeName,
+            bodySlot: item.bodySlot,
+          });
+          state.known[id].forSale = true;
+        }
+      }
+    }
+  }
+
+  // 3) Items ya conocidos que siguen a la venta: revisamos si cambio su
+  // fecha limite o su cupo restante (relevante para Limited/LimitedUnique
+  // con tiempo o cantidad fija de venta, ej. bundles de temporada). Tambien
+  // calculamos cuantas unidades se vendieron desde que el bot lo detecto.
+  const stillOnSaleItems = current.filter(
+    (i) => state.known[i.id] && state.known[i.id].forSale !== false
+  );
+
+  for (const item of stillOnSaleItems) {
+    const prev = state.known[item.id];
+    const deadlineChanged = (item.offSaleDeadline ?? null) !== (prev.offSaleDeadline ?? null);
+    const qtyChanged =
+      item.unitsAvailableForConsumption != null &&
+      item.unitsAvailableForConsumption !== prev.unitsAvailableForConsumption;
+    const soldOut = item.isLimitedUnique && item.unitsAvailableForConsumption === 0;
+
+    if (!deadlineChanged && !qtyChanged) continue;
+
+    // Throttle (Octubre 2026): en un Limited con cupo, el stock baja con CADA venta y
+    // se mandaba un aviso (Discord + juego) en cada corrida. Ahora un cambio de solo
+    // cantidad avisa como mucho una vez cada 30 min (salvo agotado o cambio de fecha
+    // limite, que avisan al instante). prev no se actualiza al saltarse, asi el
+    // cambio se reporta apenas se abre la ventana.
+    const LIMIT_UPDATE_MIN_GAP_MS = 30 * 60 * 1000;
+    if (!deadlineChanged && !soldOut && prev.lastLimitNotifyAt && Date.now() - prev.lastLimitNotifyAt < LIMIT_UPDATE_MIN_GAP_MS) {
+      continue;
+    }
+
+    const unitsSold =
+      item.isLimitedUnique && prev.originalUnits != null && item.unitsAvailableForConsumption != null
+        ? Math.max(0, prev.originalUnits - item.unitsAvailableForConsumption)
+        : null;
+
+    console.log(`Limit info updated: ${item.name} (${item.id})${soldOut ? " [SOLD OUT]" : ""}`);
+    const thumbnailUrl = (await fetchThumbnailUrl(item.id, item.itemType)) || robloxThumbnailUrl(item.id);
+    const typeLabel = item.assetTypeName ?? item.itemType;
+
+    pushEmbed(item.itemType, {
+      title: soldOut ? `🚨 SOLD OUT - ${item.name}` : `⏳ Sale Limit Updated - ${item.name}`,
+      url: robloxItemUrl(item.id),
+      color: soldOut ? 0x992d22 : 0x9b59b6,
+      thumbnail: { url: thumbnailUrl },
+      timestamp: new Date().toISOString(),
+      fields: [
+        { name: "🆔 ID", value: String(item.id), inline: true },
+        { name: "📦 Type", value: typeLabel, inline: true },
+        { name: "⏰ Sale Deadline", value: dateLabel(item.offSaleDeadline), inline: true },
+        { name: "📦 Units Remaining", value: item.isLimited || item.isLimitedUnique ? qtyLabel(item.unitsAvailableForConsumption) : "N/A (not limited)", inline: true },
+        ...(unitsSold != null ? [{ name: "🛒 Units Sold (since tracked)", value: unitsSold.toLocaleString("en-US"), inline: true }] : []),
+      ],
+    });
+    await notifyRobloxWithRetry(state, {
+      type: soldOut ? "ITEM_SOLD_OUT" : "ITEM_LIMIT_UPDATE",
+      id: item.id,
+      name: item.name,
+      itemType: item.itemType,
+      assetTypeId: item.assetTypeId,
+      assetTypeName: item.assetTypeName,
+      bodySlot: item.bodySlot,
+      offSaleDeadline: item.offSaleDeadline,
+      unitsAvailableForConsumption: item.unitsAvailableForConsumption,
+      unitsSold,
+    });
+
+    state.known[item.id].offSaleDeadline = item.offSaleDeadline ?? null;
+    state.known[item.id].unitsAvailableForConsumption = item.unitsAvailableForConsumption ?? null;
+    state.known[item.id].lastLimitNotifyAt = Date.now();
+  }
+
+  // Armar y mandar el digest agrupado: Bundles primero, luego el resto.
+  // Incluye lo que quedo pendiente de corridas anteriores (state.pendingDigest).
+  // Orden: 1) se guarda el estado CON los avisos pendientes, 2) se envian, 3) se
+  // guarda lo que haya fallado. Antes se enviaba primero y se guardaba al final:
+  // si el job se cortaba o Upstash fallaba entre medias, la siguiente corrida
+  // volvia a detectar los mismos items y repetia los avisos de Discord.
+  await saveState(state);
+
+  const typeOrder = ["Bundle", "Asset"];
+  const digestGroups = {};
+  for (const { t, embed } of state.pendingDigest) (digestGroups[t] ??= []).push(embed);
+  const sortedTypes = Object.keys(digestGroups).sort(
+    (a, b) => typeOrder.indexOf(a) - typeOrder.indexOf(b)
+  );
+  const digestEmbeds = [];
+  for (const t of sortedTypes) {
+    const label = t === "Bundle" ? "📦 BUNDLES" : "🎩 ACCESSORIES / ITEMS";
+    digestEmbeds.push(sectionHeaderEmbed(label, digestGroups[t].length));
+    digestEmbeds.push(...digestGroups[t]);
+  }
+
+  if (digestEmbeds.length > 0) {
+    const failed = await sendDigest(digestEmbeds);
+    // Los embeds fallidos se vuelven a guardar como pendientes (sin los encabezados de
+    // seccion, que se regeneran). Tope de 60 para que un Discord caido no infle el estado.
+    const failedSet = new Set(failed);
+    state.pendingDigest = state.pendingDigest.filter((e) => failedSet.has(e.embed)).slice(-60);
+    if (state.pendingDigest.length > 0) {
+      console.error(`${state.pendingDigest.length} aviso(s) de Discord quedan pendientes para la proxima corrida`);
+    }
+    await saveState(state);
+  }
+}
+
+// ---------- Estado del loop (para el endpoint de status/health-check) ----------
+// Se usa para: 1) que Render tenga algo a lo que responder en el puerto
+// asignado (requisito de los Web Services), y 2) que cron-job.org (o quien
+// sea) pueda hacer ping a este mismo endpoint para evitar que el free tier
+// se duerma tras ~15 min sin trafico HTTP. Mientras no se duerma, el proceso
+// nunca se reinicia y state.json en memoria/disco local sobrevive entre
+// ciclos (evita el problema de "todo se ve como nuevo" tras un restart).
+const tickStats = {
+  startedAt: new Date().toISOString(),
+  tickCount: 0,
+  lastTickAt: null,
+  lastTickMs: null,
+  lastError: null,
+  intervalMs: Number(POLL_INTERVAL_MS),
+};
+
+function startStatusServer() {
+  const port = Number(process.env.PORT) || 3000;
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: true, ...tickStats }, null, 2));
+  });
+  server.listen(port, () => {
+    console.log(`Status server escuchando en el puerto ${port} (para health-check y anti-sleep ping)`);
+  });
+}
+
+// Candado anti-solapamiento: si un tick tarda mas que POLL_INTERVAL_MS
+// (ej. varios items relisted/removidos seguidos, cada uno con su delay de
+// publicacion), el setInterval de mas abajo NO espera a que termine — asi
+// que sin este candado, dos tick() podrian correr en paralelo, cada uno
+// leyendo el mismo estado viejo y pisando el guardado del otro (esto
+// explicaba los "relisted" duplicados repitiendose cada 15s).
+let tickInProgress = false;
+
+async function runTickTracked() {
+  if (tickInProgress) {
+    console.log("Tick anterior aun en curso, se salta este intervalo para evitar solapamiento.");
+    return;
+  }
+  tickInProgress = true;
+  const start = Date.now();
+  try {
+    await tick();
+    tickStats.lastError = null;
+  } catch (err) {
+    console.error("Error en tick:", err);
+    tickStats.lastError = String(err?.message ?? err);
+  } finally {
+    tickInProgress = false;
+    tickStats.tickCount += 1;
+    tickStats.lastTickAt = new Date().toISOString();
+    tickStats.lastTickMs = Date.now() - start;
+  }
+}
+
+async function main() {
+  console.log("roblox-catalog-watcher iniciado");
+
+  // DEBUG_CHECK_IDS (opcional, julio 2026): modo de solo lectura para
+  // diagnosticar si uno o mas IDs puntuales ya estan en state.known,
+  // sin tocar nada (no agrega, no notifica, no guarda). Util para
+  // responder "por que no me llego X a Discord" sin adivinar -- confirma
+  // si el bot nunca vio el item, o si lo vio pero el filtro de frescura
+  // lo silencio. Valor: lista de IDs separados por coma, ej:
+  // DEBUG_CHECK_IDS=133413884007271,73754607126064
+  if (process.env.DEBUG_CHECK_IDS) {
+    const ids = process.env.DEBUG_CHECK_IDS.split(",").map((s) => s.trim()).filter(Boolean);
+    const state = await loadState();
+    console.log(`--- DEBUG_CHECK_IDS: chequeando ${ids.length} id(s) contra state.known ---`);
+    for (const id of ids) {
+      const entry = state.known[id];
+      if (entry) {
+        console.log(`  ${id}: SI esta en known -> ${JSON.stringify(entry)}`);
+        if (entry.skippedAsOld) console.log(`    ^ OJO: lo vio pero el filtro de frescura lo silencio (sin aviso).`);
+      } else {
+        console.log(`  ${id}: NO esta en known (el bot nunca lo proceso)`);
+      }
+      // Datos en vivo del item, para ver por que se habria saltado (creador, fecha, estado)
+      try {
+        const live = await fetchItemFullDetails([id]);
+        if (live.length === 0) {
+          console.log(`    en vivo: la API de detalles no devolvio datos para ${id}`);
+        } else {
+          const it = live[0];
+          const ageDays = it.createdUtc ? ((Date.now() - new Date(it.createdUtc).getTime()) / 86400000).toFixed(1) : "?";
+          console.log(
+            `    en vivo: name="${it.name}" type=${it.itemType} forSale=${it.forSale} price=${it.price} creado=${it.createdUtc} (${ageDays} dias) status=[${it.itemStatus.join(",")}] limited=${it.isLimited}`
+          );
+        }
+      } catch (err) {
+        console.log(`    en vivo: error consultando detalles: ${err.message}`);
+      }
+    }
+    console.log("--- fin DEBUG_CHECK_IDS, no se modifico ningun estado ---");
+    return;
+  }
+
+  // RUN_ONCE=true: corre un solo ciclo y termina (modo para GitHub Actions
+  // cron u otro scheduler externo, en vez de mantener un proceso 24/7).
+  if (process.env.RUN_ONCE === "true") {
+    await tick();
+    console.log("Ciclo unico completado, saliendo.");
+    return;
+  }
+
+  // Modo persistente (Render Web Service): levanta un servidor HTTP minimo
+  // (requisito de Render para no matar el servicio por no bindear $PORT, y
+  // ademas es el endpoint al que cron-job.org le hace ping para anti-sleep)
+  // y corre el ciclo en un setInterval propio, sin depender de ningun
+  // scheduler externo. Esto es lo que elimina el retraso de la cola de
+  // GitHub Actions cron.
+  startStatusServer();
+
+  const interval = Number(POLL_INTERVAL_MS);
+  await runTickTracked();
+  setInterval(runTickTracked, interval);
+}
+
+main();
