@@ -200,19 +200,20 @@ async function upstashSet(key, value) {
 
 async function loadState() {
   if (USE_UPSTASH) {
-    try {
-      const raw = await upstashGet(STATE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        console.log(
-          `Estado cargado de Upstash: ${Object.keys(parsed.known ?? {}).length} item(s) conocido(s), lastFullRecheckAt=${parsed.lastFullRecheckAt ?? "nunca"}`
-        );
-        return parsed;
-      }
-      console.log("Estado cargado de Upstash: vacio (key no existe todavia)");
-    } catch (err) {
-      console.error("Error leyendo estado de Upstash, se usa estado vacio:", err);
+    // CAMBIO (Octubre 2026): si Upstash falla (ej. base suspendida, token
+    // invalido), se LANZA el error. Antes se atrapaba y se seguia con un
+    // estado vacio, lo que hacia que TODO item reciente se anunciara de
+    // nuevo en cada corrida y que el estado real pudiera ser pisado.
+    // Ahora la corrida termina en rojo y no manda nada a Discord ni al juego.
+    const raw = await upstashGet(STATE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      console.log(
+        `Estado cargado de Upstash: ${Object.keys(parsed.known ?? {}).length} item(s) conocido(s), lastFullRecheckAt=${parsed.lastFullRecheckAt ?? "nunca"}`
+      );
+      return parsed;
     }
+    console.log("Estado cargado de Upstash: vacio (key no existe todavia)");
     return { known: {}, pendingGameSync: [] };
   }
   try {
@@ -224,18 +225,16 @@ async function loadState() {
 }
 
 async function saveState(state) {
-  const json = JSON.stringify(state, null, 2);
+  // CAMBIO (Octubre 2026): JSON compacto (sin sangria) para reducir el peso de
+  // cada lectura/escritura en Upstash, y los errores de guardado ya no se
+  // tragan en silencio: se lanzan para que la corrida termine en rojo.
+  const json = JSON.stringify(state);
   if (USE_UPSTASH) {
-    try {
-      await upstashSet(STATE_KEY, json);
-      console.log(
-        `Estado guardado en Upstash: ${Object.keys(state.known ?? {}).length} item(s) conocido(s), lastFullRecheckAt=${state.lastFullRecheckAt ?? "nunca"}, ${json.length} bytes`
-      );
-      return;
-    } catch (err) {
-      console.error("Error guardando estado en Upstash (se pierde este ciclo si el proceso reinicia):", err);
-      return;
-    }
+    await upstashSet(STATE_KEY, json);
+    console.log(
+      `Estado guardado en Upstash: ${Object.keys(state.known ?? {}).length} item(s) conocido(s), lastFullRecheckAt=${state.lastFullRecheckAt ?? "nunca"}, ${json.length} bytes`
+    );
+    return;
   }
   await fs.writeFile(STATE_FILE, json);
 }
