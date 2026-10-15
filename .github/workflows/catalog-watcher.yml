@@ -3,7 +3,12 @@ name: Catalog Watcher Tick
 on:
   schedule:
     - cron: "*/5 * * * *"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      debug_check_ids:
+        description: "Opcional: IDs separados por coma para diagnosticar (no notifica ni guarda nada). Ej: 123456,789012"
+        required: false
+        default: ""
 
 concurrency:
   group: catalog-watcher-tick
@@ -12,7 +17,10 @@ concurrency:
 jobs:
   tick:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    # 4 min era poco cuando se detectan muchos items de golpe (cada uno tarda ~1-3 s por las
+    # pausas de MessagingService/miniaturas) y un corte antes del guardado repetia los avisos.
+    # El bot ahora guarda estado a ratos y al recibir SIGTERM, pero conviene dar margen.
+    timeout-minutes: 8
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,6 +41,7 @@ jobs:
         run: node index.js
         env:
           RUN_ONCE: "true"
+          DEBUG_CHECK_IDS: ${{ github.event.inputs.debug_check_ids }}
           ROBLOX_API_KEY: ${{ secrets.ROBLOX_API_KEY }}
           UNIVERSE_ID: ${{ secrets.UNIVERSE_ID }}
           MESSAGING_TOPIC: ${{ secrets.MESSAGING_TOPIC }}
