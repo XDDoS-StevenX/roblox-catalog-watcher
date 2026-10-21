@@ -198,6 +198,11 @@ async function upstashSet(key, value) {
   if (!res.ok) throw new Error(`Upstash SET fallo: ${res.status}`);
 }
 
+// CAMBIO (Octubre 2026): ultimo JSON que se sabe que esta en Upstash (el que se
+// cargo al inicio o el que se guardo con exito). saveState lo compara para no
+// reescribir el estado entero cuando no cambio nada (ahorra ancho de banda).
+let lastPersistedJson = null;
+
 async function loadState() {
   if (USE_UPSTASH) {
     // CAMBIO (Octubre 2026): si Upstash falla (ej. base suspendida, token
@@ -208,6 +213,7 @@ async function loadState() {
     const raw = await upstashGet(STATE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
+      lastPersistedJson = JSON.stringify(parsed); // misma serializacion que usa saveState
       console.log(
         `Estado cargado de Upstash: ${Object.keys(parsed.known ?? {}).length} item(s) conocido(s), lastFullRecheckAt=${parsed.lastFullRecheckAt ?? "nunca"}`
       );
@@ -230,7 +236,13 @@ async function saveState(state) {
   // tragan en silencio: se lanzan para que la corrida termine en rojo.
   const json = JSON.stringify(state);
   if (USE_UPSTASH) {
+    // Si el estado es identico al que ya esta en Upstash, no se escribe nada.
+    if (json === lastPersistedJson) {
+      console.log("Estado sin cambios: no se guarda en Upstash");
+      return;
+    }
     await upstashSet(STATE_KEY, json);
+    lastPersistedJson = json; // solo tras un guardado exitoso (si falla, upstashSet lanza)
     console.log(
       `Estado guardado en Upstash: ${Object.keys(state.known ?? {}).length} item(s) conocido(s), lastFullRecheckAt=${state.lastFullRecheckAt ?? "nunca"}, ${json.length} bytes`
     );
