@@ -65,16 +65,12 @@ suficiente.
 
 ## 5. Lado Roblox
 
-1. Copia `CatalogUpdateListener.server.lua` a `ServerScriptService`
-2. Crea un `RemoteEvent` llamado `CatalogUpdateEvent` dentro de
-   `ReplicatedStorage/RemoteEvents` (ya tienes esa carpeta segun tu
-   estructura de proyecto)
-3. En el cliente, escucha ese evento donde quieras mostrar el toast de
-   "Nuevo objeto disponible" — mismo patron visual que ya usas en
-   `MilestoneClient` o `RankUpCelebration`
-4. El script muta `AccessoryConfig` en memoria; si quieres que el cambio
-   sobreviva a un reinicio del servidor de Roblox, agrega tambien un guardado
-   a DataStore dentro de `handleItemAdded`/`handleItemRemoved`
+Los scripts del juego (`CatalogUpdateListener` y el resto) viven solo en Roblox
+Studio, dentro del place "Roblox Sale Place". Ya no se guarda una copia aca:
+la que habia estaba desactualizada por meses y podia pisar el script real si
+alguien la pegaba en Studio. El juego recibe los avisos del bot por
+MessagingService (topic `ItemCatalogUpdate`) y lee el estado de Upstash con un
+token de solo lectura.
 
 ## Notas
 
