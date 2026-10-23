@@ -901,6 +901,44 @@ async function tick() {
     const hasNewTag = (item.itemStatus ?? []).some((s) => /new/i.test(s));
     const isStale = ageMs != null && ageMs > ITEM_FRESHNESS_THRESHOLD_MS && !hasNewTag;
 
+    // Piezas sueltas de un bundle (Octubre 2026, Hollow Horseman): Roblox publica
+    // cada pieza (Torso, Cape, Coat...) como asset, pero NO las vende por separado.
+    // La API las devuelve sin priceStatus, sin flag de venta y sin precio, asi que
+    // forSale quedaba undefined y se guardaban/anunciaban como "a la venta". Un
+    // asset sin NINGUNA senal de venta ni precio (y no Limited) se guarda como
+    // conocido fuera de venta, sin aviso a Discord ni al juego. Los items gratis
+    // traen priceStatus "Free", asi que no caen aqui. Si algun dia se venden
+    // sueltas, la autocorreccion (paso 2.5) las detecta como relist.
+    const isLoosePiece =
+      item.itemType !== "Bundle" &&
+      item.forSale === undefined &&
+      item.price == null &&
+      !item.isLimited &&
+      !item.isLimitedUnique;
+
+    if (isLoosePiece) {
+      console.log(`Asset sin precio ni venta propia (probable pieza de bundle), se guarda fuera de venta sin notificar: ${item.name} (${item.id})`);
+      state.known[item.id] = {
+        name: item.name,
+        price: null,
+        forSale: false,
+        itemType: item.itemType,
+        assetTypeId: item.assetTypeId,
+        assetTypeName: item.assetTypeName,
+        bodySlot: item.bodySlot,
+        taxonomyTags: item.taxonomyTags ?? [],
+        isLimited: false,
+        isLimitedUnique: false,
+        offSaleDeadline: item.offSaleDeadline ?? null,
+        unitsAvailableForConsumption: item.unitsAvailableForConsumption ?? null,
+        originalUnits: item.unitsAvailableForConsumption ?? null,
+        isHighValue: false,
+        firstSeenAt: Date.now(),
+        loosePiece: true,
+      };
+      continue;
+    }
+
     if (isStale) {
       console.log(
         `Item antiguo detectado por primera vez (creado ${item.createdUtc}, forSale=${item.forSale}, price=${item.price}, status=[${(item.itemStatus ?? []).join(",")}]), se agrega como conocido sin notificar: ${item.name} (${item.id})`
