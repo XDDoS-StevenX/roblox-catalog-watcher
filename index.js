@@ -487,6 +487,8 @@ async function checkStillForSale(items) {
       }
       result[it.id] = {
         purchasable: forSale,
+        // (Oct 2026) precio actual: sirve para confirmar el lanzamiento de un item "upcoming"
+        price: typeof it.price === "number" ? it.price : null,
         offSaleDeadline: it.offSaleDeadline ?? null,
         unitsAvailableForConsumption:
           typeof it.unitsAvailableForConsumption === "number"
@@ -801,8 +803,9 @@ process.on("SIGTERM", async () => {
   process.exit(143);
 });
 
-async function tick() {
-  const state = await loadState();
+async function tick(preloadedState) {
+  // (29 oct 2026) en modo ventana (varias corridas por job) el estado se carga UNA vez y se reusa en memoria
+  const state = preloadedState ?? (await loadState());
   currentState = state;
   state.pendingGameSync ??= []; // compatibilidad con state.json de corridas viejas
   state.pendingDigest ??= []; // avisos de Discord pendientes (ver pushEmbed)
@@ -899,7 +902,18 @@ async function tick() {
     // como "antiguo". La etiqueta "New" que pone Roblox (itemStatus) si indica
     // lanzamiento reciente, asi que un item con esa etiqueta NUNCA se descarta.
     const hasNewTag = (item.itemStatus ?? []).some((s) => /new/i.test(s));
-    const isStale = ageMs != null && ageMs > ITEM_FRESHNESS_THRESHOLD_MS && !hasNewTag;
+    // CAMBIO (29 oct 2026): Roblox sube muchos items DIAS antes y los deja ocultos hasta el lanzamiento.
+    // Bloodsteel Bathelm (R$50,000), Scorched Riddling Skull y The Ashen Reaper se crearon el 21 oct, salieron
+    // a la venta el 27 y el filtro de 5 dias los silencio: ni Discord ni el juego se enteraron. Un item que
+    // aparece A LA VENTA y con precio se considera lanzamiento real si se creo hace menos de 90 dias (el ruido
+    // de las migraciones de Roblox son items de hace anios). Los fuera de venta siguen con el limite de 5 dias.
+    // Bundles: la busqueda a veces no trae una fecha valida; sin fecha creible no se descartan por edad.
+    const onSaleWithPrice = item.forSale !== false && typeof item.price === "number" && item.price > 0;
+    const ON_SALE_FRESHNESS_MS = 90 * 24 * 60 * 60 * 1000;
+    const createdYear = createdAt != null && !Number.isNaN(createdAt) ? new Date(createdAt).getUTCFullYear() : null;
+    const unknownBundleAge = item.itemType === "Bundle" && (createdYear == null || createdYear < 2006);
+    const freshLimit = onSaleWithPrice ? ON_SALE_FRESHNESS_MS : ITEM_FRESHNESS_THRESHOLD_MS;
+    const isStale = !unknownBundleAge && ageMs != null && ageMs > freshLimit && !hasNewTag;
 
     // Piezas sueltas de un bundle (Octubre 2026, Hollow Horseman): Roblox publica
     // cada pieza (Torso, Cape, Coat...) como asset, pero NO las vende por separado.
@@ -977,6 +991,11 @@ async function tick() {
     if (processedNew > 0 && processedNew % 10 === 0) await saveState(state);
     processedNew += 1;
     console.log(`New item detected: ${item.name} (${item.id})`);
+    // (29 oct 2026) PROXIMO LANZAMIENTO: Roblox lo subio pero todavia no lo vende (fuera de venta, sin precio o
+    // con el provisional de R$1). Es lo que anuncia Mr. Notifier como "upcoming". Antes salia como un item
+    // fuera de venta mas; ahora se marca, y el paso 2.6 lo revisa en cada corrida para avisar al momento en
+    // que sale a la venta.
+    const isUpcoming = item.forSale === false && (item.price == null || item.price <= 1) && item.itemType !== "Bundle";
     const saleLabel =
       item.forSale === true
         ? "Yes"
@@ -1005,7 +1024,7 @@ async function tick() {
     const unitsLabel = item.isLimited || item.isLimitedUnique ? qtyLabel(item.unitsAvailableForConsumption) : "N/A (not limited)";
 
     pushEmbed(item.itemType, {
-      title: `✨ New Item - ${item.name}`,
+      title: isUpcoming ? `🔜 Upcoming Item - ${item.name}` : `✨ New Item - ${item.name}`,
       description: item.description || undefined,
       url: robloxItemUrl(item.id),
       color: item.forSale === false ? 0xf1c40f : isHighValue ? 0xe67e22 : 0x2ecc71,
@@ -1052,6 +1071,7 @@ async function tick() {
       unitsSold: 0,
       isHighValue,
       favoriteCount: item.favoriteCount,
+      upcoming: isUpcoming || undefined,
     });
     state.known[item.id] = {
       name: item.name,
@@ -1073,6 +1093,7 @@ async function tick() {
       originalUnits: item.unitsAvailableForConsumption ?? null,
       isHighValue,
       firstSeenAt: Date.now(),
+      ...(isUpcoming ? { upcoming: true } : {}),
     };
   }
 
@@ -1219,8 +1240,18 @@ async function tick() {
   // en realidad siguen o volvieron a estar a la venta. Se revisan en la
   // misma revalidacion periodica de 5 min que el paso 2, para no sumar
   // llamadas extra a la API fuera de ese intervalo.
+  // Candidatos a "lanzamiento" (ver paso 2.6): se revisan aparte, en cada corrida, asi que el 2.5 los salta.
+  const UPCOMING_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+  const isUpcomingCandidate = (id) => {
+    const k = state.known[id];
+    if (k.forSale !== false || k.itemType === "Bundle" || k.loosePiece || k.released || k.skippedAsOld) return false;
+    if (!k.firstSeenAt || now - k.firstSeenAt > UPCOMING_WINDOW_MS) return false;
+    return k.upcoming === true || k.price == null || k.price <= 1;
+  };
   if (dueForFullRecheck) {
-    const offSaleIds = Object.keys(state.known).filter((id) => state.known[id].forSale === false);
+    const offSaleIds = Object.keys(state.known).filter(
+      (id) => state.known[id].forSale === false && !isUpcomingCandidate(id)
+    );
     if (offSaleIds.length > 0) {
       const relistStatus = await checkStillForSale(
         offSaleIds.map((id) => ({ id: Number(id), itemType: state.known[id].itemType }))
@@ -1264,10 +1295,81 @@ async function tick() {
             assetTypeId: item.assetTypeId,
             assetTypeName: item.assetTypeName,
             bodySlot: item.bodySlot,
+            price: typeof relistStatus[id]?.price === "number" ? relistStatus[id].price : item.price,
           });
+          if (typeof relistStatus[id]?.price === "number") item.price = relistStatus[id].price;
           state.known[id].forSale = true;
         }
       }
+    }
+  }
+
+  // 2.6) LANZAMIENTOS (29 oct 2026). Los items "upcoming" (vistos fuera de venta y sin precio real en los
+  // ultimos 14 dias) se revisan en CADA corrida contra el endpoint de detalles, que no depende del indice de
+  // busqueda de Roblox (ese tarda 10-25 min en mostrar items nuevos). Antes solo se miraban cada 5 min y con
+  // 2 confirmaciones, asi que el lanzamiento llegaba 5-10 min tarde. Se confirma al instante si Roblox ya da
+  // un precio real (> R$1); si no, hace falta una segunda corrida que lo confirme.
+  const upcomingIds = Object.keys(state.known).filter(isUpcomingCandidate);
+  if (upcomingIds.length > 0) {
+    const status = await checkStillForSale(
+      upcomingIds.map((id) => ({ id: Number(id), itemType: state.known[id].itemType ?? "Asset" }))
+    );
+    for (const id of upcomingIds) {
+      const s = status[id];
+      const item = state.known[id];
+      if (s?.purchasable !== true) {
+        delete item.releaseStrikes;
+        continue;
+      }
+      const realPrice = typeof s.price === "number" && s.price > 1;
+      item.releaseStrikes = (item.releaseStrikes ?? 0) + 1;
+      if (!realPrice && item.releaseStrikes < 2) {
+        console.log(`Posible lanzamiento (1/2, sin precio todavia): ${item.name} (${id})`);
+        continue;
+      }
+      delete item.releaseStrikes;
+      delete item.relistStrikes;
+      notifiedRelistedThisProcess.add(id);
+      item.forSale = true;
+      item.released = true;
+      item.releasedAt = Date.now();
+      if (typeof s.price === "number") item.price = s.price;
+      item.offSaleDeadline = s.offSaleDeadline ?? item.offSaleDeadline ?? null;
+      item.unitsAvailableForConsumption = s.unitsAvailableForConsumption ?? item.unitsAvailableForConsumption ?? null;
+      const isHighValue = typeof item.price === "number" && item.price >= minValue;
+      item.isHighValue = isHighValue;
+      console.log(`RELEASED (sale a la venta): ${item.name} (${id}) R$ ${item.price}`);
+      const thumbnailUrl = (await fetchThumbnailUrl(id, item.itemType)) || robloxThumbnailUrl(id);
+      pushEmbed(item.itemType, {
+        title: `🚀 Now On Sale - ${item.name}`,
+        url: robloxItemUrl(id),
+        color: isHighValue ? 0xe67e22 : 0x2ecc71,
+        thumbnail: { url: thumbnailUrl },
+        timestamp: new Date().toISOString(),
+        fields: [
+          { name: "🆔 ID", value: String(id), inline: true },
+          { name: "📦 Type", value: item.assetTypeName ?? item.itemType, inline: true },
+          { name: "💵 Price", value: item.price != null ? `${item.price} R$` : "N/A", inline: true },
+          { name: "⏰ Sale Deadline", value: dateLabel(item.offSaleDeadline), inline: true },
+          { name: "🌟 High Value?", value: isHighValue ? "Yes" : "No", inline: true },
+        ],
+      });
+      await notifyRobloxWithRetry(state, {
+        type: "ITEM_RELISTED",
+        released: true, // el juego lo trata como lanzamiento (cartel, stands, tablero), no como "vuelve a la venta"
+        id: Number(id),
+        name: item.name,
+        itemType: item.itemType,
+        assetTypeId: item.assetTypeId,
+        assetTypeName: item.assetTypeName,
+        bodySlot: item.bodySlot,
+        price: item.price,
+        isLimited: item.isLimited === true,
+        isLimitedUnique: item.isLimitedUnique === true,
+        offSaleDeadline: item.offSaleDeadline,
+        unitsAvailableForConsumption: item.unitsAvailableForConsumption,
+        isHighValue,
+      });
     }
   }
 
@@ -1475,8 +1577,25 @@ async function main() {
   // RUN_ONCE=true: corre un solo ciclo y termina (modo para GitHub Actions
   // cron u otro scheduler externo, en vez de mantener un proceso 24/7).
   if (process.env.RUN_ONCE === "true") {
-    await tick();
-    console.log("Ciclo unico completado, saliendo.");
+    // CAMBIO (29 oct 2026): cada job de GitHub Actions corria UNA sola revision (~20 s) y quedaba quieto el
+    // resto de los 2 min hasta el siguiente disparo de cron-job.org. Ahora, dentro del mismo job, se repite la
+    // revision cada TICK_EVERY_SECONDS durante RUN_WINDOW_SECONDS (por defecto 3 corridas: 0 s, 30 s y 60 s).
+    // El estado se lee de Upstash una sola vez por job y solo se escribe si cambio, asi que el uso de Upstash
+    // no sube (baja). Con RUN_WINDOW_SECONDS=0 vuelve al comportamiento de antes.
+    const windowMs = Math.max(0, Number(process.env.RUN_WINDOW_SECONDS ?? 65)) * 1000;
+    const everyMs = Math.max(20, Number(process.env.TICK_EVERY_SECONDS ?? 30)) * 1000;
+    const startedAt = Date.now();
+    const state = await loadState();
+    let runs = 0;
+    while (true) {
+      const tickStart = Date.now();
+      await tick(state);
+      runs += 1;
+      const nextAt = tickStart + everyMs;
+      if (nextAt - startedAt > windowMs) break;
+      await sleep(Math.max(0, nextAt - Date.now()));
+    }
+    console.log(`Ventana completada: ${runs} revision(es) en ${Math.round((Date.now() - startedAt) / 1000)} s, saliendo.`);
     return;
   }
 
