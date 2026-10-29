@@ -1072,6 +1072,7 @@ async function tick(preloadedState) {
       isHighValue,
       favoriteCount: item.favoriteCount,
       upcoming: isUpcoming || undefined,
+      firstSeenAt: Date.now(), // el tablero de lanzamientos del juego lo necesita para mostrarlo al instante
     });
     state.known[item.id] = {
       name: item.name,
